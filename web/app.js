@@ -426,9 +426,13 @@ function aqiBandPoints(aqi) {
  *  appears only when all three providers answer; a missing provider is never
  *  treated as zero. */
 function greenContextScore() {
-  const green = provider(state.environment, 'greenspace');
-  const air = provider(state.environment, 'air_quality');
-  const carbon = provider(state.environment, 'carbon_intensity');
+  // Follow the browsed postcode like every other environment consumer: the
+  // three provider cards and the green-space list already read
+  // visibleEnvironment(), so reading state.environment here left the score
+  // showing the home community while the rest of the page had moved.
+  const green = provider(visibleEnvironment(), 'greenspace');
+  const air = provider(visibleEnvironment(), 'air_quality');
+  const carbon = provider(visibleEnvironment(), 'carbon_intensity');
   const missing = [];
 
   const distances = isFreshProvider(green) && Array.isArray(green.data)
