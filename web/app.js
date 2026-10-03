@@ -322,6 +322,7 @@ function community() {
   const banner = state.impact;
   const shownOutcode = esc(homeOutcode());
   return `<section class="hero"><div class="hero-copy"><span class="location"><i></i> Small actions. Right on your doorstep.</span><h1>A little sharing.<br>A <em>greener</em><br>neighbourhood.</h1><p>The tools you need might be just next door.<br>Borrow, lend, and make your patch a little better.</p><form class="postcode-form" id="postcode-form"><span aria-hidden="true">⌖</span><input id="postcode" aria-label="Your UK postcode" value="${esc(homePostcode())}" maxlength="10" required><button type="submit">Check a postcode ↗</button></form><p class="field-message" id="postcode-message">${postcodeMessage()}</p></div><div class="hero-art">${gardenArt()}<span class="art-note">Good things grow together.</span><div class="art-label"><div class="mini-avatars"><span>A</span><span>B</span><span>♡</span></span></span></div></div></section>
+${storiesStrip()}
 <section><div class="section-heading"><div><h2>A small look at your local patch</h2><p>Environmental context for ${esc(homePostcode())} — reported per provider by the API.</p></div><span class="eyebrow">YOUR POSTCODE, TOGETHER</span></div><div class="environment">${envCard('≋','The air around you','air_quality','Open-Meteo')}${envCard('ϟ','Your regional electricity','carbon_intensity','NESO Carbon Intensity')}<div class="env-card"><span class="env-icon">♧</span><div><h3>Room to grow</h3><strong>${esc(greenspaceLabel())}</strong><p>Green spaces near ${shownOutcode}</p></div></div></div>${contextScoreCard()}</section>
 <div class="workspace"><section><div class="section-heading"><div><h2>Good tools. Great neighbours.</h2><p>Something sitting in your shed could start something good.</p></div><button class="btn secondary" data-publish>＋ Lend a tool</button></div><div class="filterbar"><div class="filters">${[['all','All tools'],['garden','Gardening'],['cleanup','Clean-up'],['available','Available']].map(([v,l])=>`<button class="chip ${ui.filter===v?'active':''}" data-filter="${v}">${l}</button>`).join('')}</div><input class="search-input" id="tool-search" value="${esc(ui.search)}" placeholder="Search tools…" aria-label="Search tools"></div><div class="tool-grid" id="tool-grid">${toolCards()}</div></section><aside><div class="action-card"><span class="eyebrow">LET’S DO SOME GOOD</span><span class="flower">✳</span><h2>A greener street<br>starts with us.</h2><p>Pick a small action. Find the tools.<br>Make a difference, together.</p><a class="btn primary" href="#task">Start a community action <span>↗</span></a></div><div class="map-card" id="project-map">${projectMapCard()}</div></aside></div><div class="bottom-banner"><span>✳</span><div><strong>The more we share, the more we can do.</strong><p>${banner ? `${banner.active_tools_count} tools shared · ${banner.returned_loans_count} returned loans · ${banner.completed_tasks_count} completed actions in ${esc(me.community.outcode)}.` : 'A missing litter picker today. A whole community clean-up tomorrow.'}</p></div><button class="text-button" data-publish>Be someone’s helpful neighbour ↗</button></div>`;
 }
@@ -331,7 +332,7 @@ function projectMapCard() {
   const you = homeCommunity();
   const tools = listedTools()
     .filter(t => t.availability === 'available' && t.owner.id !== state.me.id)
-    .map(t => ({ ...t, latitude: t.community.latitude, longitude: t.community.longitude }));
+    .map(t => ({ ...t, owner_name: t.owner.display_name, latitude: t.community.latitude, longitude: t.community.longitude }));
   const green = provider(state.environment, 'greenspace');
   const greenspaces = isFreshProvider(green) && Array.isArray(green.data) ? green.data.slice(0, 5) : [];
   const plan = M.planNearestRoute(you, tools);
@@ -342,6 +343,36 @@ function projectMapCard() {
   const native = `<div class="route-map">${map}</div><p class="route-summary" role="status">${esc(description)}</p><section class="map-green-section" aria-label="Green spaces nearby"><h4>Green spaces nearby</h4>${greenSpacePanel()}</section>`;
   return `<h3>⌖ Your next little project</h3>${slot('map', native)}`;
 }
+
+/* ---- Stories from the street: latest recorded outcomes, live from the shared
+   ledger. The strip rotates so the home page keeps moving. ---- */
+function streetStories() {
+  return state.tasks
+    .filter(t => t.status === 'completed' && t.outcome && t.outcome.note)
+    .sort((a, b) => String(b.completed_at || '').localeCompare(String(a.completed_at || '')));
+}
+function storyCards(stories) {
+  const list = stories || streetStories();
+  if (!list.length) return '';
+  const n = Math.min(3, list.length);
+  const total = list.length;
+  const off = ((ui.storyOffset || 0) % total + total) % total;
+  let out = '';
+  for (let i = 0; i < n; i++) {
+    const t = list[(off + i) % total];
+    const when = t.completed_at ? String(t.completed_at).slice(0, 10) : '';
+    out += `<article class="story-card"><p>${esc(t.outcome.note)}</p><footer><b>${esc(t.creator ? t.creator.display_name : 'A neighbour')}</b><span>${esc(t.title || 'Community action')}${when ? ' · ' + esc(when) : ''}</span></footer></article>`;
+  }
+  return out;
+}
+function storiesStrip() {
+  const stories = streetStories();
+  const body = stories.length
+    ? `<div class="story-row" id="story-row">${storyCards(stories)}</div>`
+    : `<div class="stories-empty" id="story-row">No stories yet — record the first one after your next action.</div>`;
+  return `<section class="stories-strip"><div class="section-heading"><div><h2>Stories from the street</h2><p>The latest actions neighbours recorded — read straight from the shared ledger.</p></div><span class="eyebrow">STORIES FROM THE STREET</span></div>${body}</section>`;
+}
+
 function greenspaceLabel() {
   const p = provider(state.environment, 'greenspace');
   if (p && (p.status === 'ok' || p.status === 'cached')) return p.attribution || 'Connected';
@@ -520,7 +551,15 @@ function selectedTaskPlace(options = taskPlaceOptions()) {
   return selected ? selected.place : defaultTaskPlace();
 }
 function taskPlacePanel(task) {
-  if (task) return `<label>Where are we helping?<input id="place-name" value="${esc(task.place.name)}" maxlength="120" readonly></label><p class="notice">Meeting point saved with the action by the backend (within 2 km of ${esc(homePostcode())}).</p>`;
+  // One panel shape for everyone: the meeting-point list stays visible and only
+  // becomes read-only while an action is in progress, so Alice's and Bob's
+  // pages stay structurally identical.
+  const locked = !!task;
+  if (locked) {
+    const options = taskPlaceOptions();
+    const rows = options.map(p => `<label class="place-option disabled"><input type="radio" name="task-place" disabled><span><b>${esc(p.place.name)}</b><small>${esc(p.type)} · ${p.distance === null ? 'distance pending' : `${p.distance.toFixed(2)} km · straight-line distance`}</small></span></label>`).join('');
+    return `<fieldset class="place-panel" id="task-place-panel"><legend>Where are we helping?</legend><label class="place-option"><input type="radio" checked disabled><span><b>${esc(task.place.name)}</b><small>Meeting point of your in-progress action</small></span></label>${rows}</fieldset><p class="notice">Meeting point is locked while this action is in progress (within 2 km of ${esc(homePostcode())}).</p>`;
+  }
   const options = taskPlaceOptions();
   const selected = selectedTaskPlace(options);
   const rows = options.map(p => `<label class="place-option"><input type="radio" name="task-place" data-task-place="${esc(p.id)}" value="${esc(p.id)}" ${selected.source === 'osm' && selected.source_id === p.id ? 'checked' : ''} ${p.disabled ? 'disabled' : ''}><span><b>${esc(p.place.name)}</b><small>${esc(p.type)} · ${p.distance === null ? 'distance pending' : `${p.distance.toFixed(2)} km · straight-line distance`}${p.reason ? ` · ${esc(p.reason)}` : ''}</small></span></label>`).join('');
@@ -575,13 +614,24 @@ function taskPage() {
     : `<p class="notice">No action templates came back from the backend.</p>`;
   const checklist = (task
     ? `<p class="muted">${progress.confirmed} of ${progress.total} requirements confirmed. Finding a tool is only the first step.</p><div class="progress-track"><span style="width:${progress.percent}%"></span></div><p class="muted">${esc(progress.nextAction)}</p>${progress.rows.map(row => requirementRow(row, task)).join('')}${((D.TEMPLATES[task.template_id] || {}).consumables || []).map(c => `<div class="requirement"><div><b>${esc(c.label)}</b><small>Consumable · bring your own, not part of tool loans</small></div><span>↗</span></div>`).join('')}`
-    : `<p class="muted">Pick an action above. The checklist builds itself from the tools your neighbours already have.</p><div class="progress-track"><span style="width:0%"></span></div>`
+    : `<p class="muted">Your tool checklist appears here once you pick a project.</p><div class="progress-track"><span style="width:0%"></span></div>${
+      state.templates.map(t => {
+        const info = D.TEMPLATES[t.id] || {};
+        const need = (info.requirements || []).map(r => D.categoryLabel(r.category) || r.category).join(' + ');
+        return `<div class="requirement ghost"><div><b>${esc(t.title || t.id)}</b><small>${esc(need || 'Tools follow the template')} — pick this project to borrow them</small></div><span>↗</span></div>`;
+      }).join('')
+    }`
   ) + wantedStrip(board);
-  const story = !storyTask
-    ? `<p class="muted">Choose an action first. You can record what you did once the action is under way.</p>`
-    : storyTask.status === 'completed'
-      ? `<p class="muted">Recorded ${esc(String(storyTask.completed_at || '').slice(0, 16).replace('T', ' '))} UTC.</p><label>Your outcome<textarea id="outcome-note" readonly>${esc(recorded ? recorded.note : '')}</textarea></label><div class="impact-fields"><label>Bags collected<input id="impact-bags" type="number" value="${recorded && recorded.bags_collected !== null ? recorded.bags_collected : ''}" readonly></label><label>Volunteer minutes<input id="impact-minutes" type="number" value="${recorded && recorded.volunteer_minutes !== null ? recorded.volunteer_minutes : ''}" readonly></label></div><p class="notice">Self-reported by the organiser. Returns are counted separately from this report.</p>`
-      : `<p class="muted">Finished your action? Record what you did. A returned tool does not complete an action.</p><label>Your outcome<textarea id="outcome-note" maxlength="500" placeholder="What did you do for your neighbourhood?"></textarea></label><div class="impact-fields"><label>Bags collected<input id="impact-bags" type="number" min="0" step="1" value=""></label><label>Volunteer minutes<input id="impact-minutes" type="number" min="0" step="5" value=""></label></div>${readiness && readiness.warning ? `<p class="notice">${esc(readiness.warning)}</p>` : ''}<button class="btn primary" id="complete-task" ${readiness && !readiness.canSubmit ? 'disabled' : ''}>Record completed action ↗</button><p class="muted">Completion is self-reported by the organiser.</p>`;
+  const story = (() => {
+    // Same skeleton for everyone: your latest story, then the recording slot.
+    const recordedBlock = recorded
+      ? `<p class="muted">Recorded ${esc(String(storyTask.completed_at || '').slice(0, 16).replace('T', ' '))} UTC.</p><div class="story-quote">${esc(recorded.note)}</div><p class="notice">Self-reported by the organiser. Returns are counted separately from this report.</p>`
+      : `<p class="muted">Nothing recorded yet — your finished actions will appear here.</p>`;
+    const formBlock = task && task.status === 'open'
+      ? `<label>Your outcome<textarea id="outcome-note" maxlength="500" placeholder="What did you do for your neighbourhood?"></textarea></label>${readiness && readiness.warning ? `<p class="notice">${esc(readiness.warning)}</p>` : ''}<button class="btn primary" id="complete-task" ${readiness && !readiness.canSubmit ? 'disabled' : ''}>Record completed action ↗</button><p class="muted">Completion is self-reported by the organiser. A returned tool does not complete an action.</p>`
+      : `<p class="muted">Nothing to record right now — pick an action below, bring the tools together, then tell its story here.</p>`;
+    return `<div class="story-latest"><span class="eyebrow">LATEST STORY</span>${recordedBlock}</div><div class="story-form"><span class="eyebrow">RECORD AN ACTION</span>${formBlock}</div>`;
+  })();
   const place = taskPlacePanel(task);
   return `<div class="page-heading"><span class="eyebrow">SMALL ACTIONS, SHARED POSSIBILITIES</span><h1>Let's make something <em>good.</em></h1><p>Choose an action and bring the right tools together.</p></div><div class="task-layout"><div><section class="panel"><h2>01 / Pick your little project</h2>${place}<div class="template-options">${templateButtons}</div></section><section class="panel"><h2>02 / Bring the tools together</h2>${slot('tasks', checklist)}</section></div><aside><section class="panel"><span class="eyebrow">EVERY STEP COUNTS</span><h2 style="margin-top:15px">03 / Tell the story</h2>${story}</section><section class="panel"><h2>Little actions, adding up.</h2>${slot('outcomes', impactPanel(report))}</section></aside></div>`;
 }
@@ -784,12 +834,7 @@ async function completeTask(btn) {
   const noteEl = $('#outcome-note');
   const note = String(noteEl && noteEl.value || '').trim();
   if (!note) { toast('Add a short outcome before recording your action.'); if (noteEl && noteEl.focus) noteEl.focus(); return; }
-  const toInt = v => { const s = String(v ?? '').trim(); return /^\d+$/.test(s) ? Number(s) : null; };
-  const body = {
-    outcome_note: note,
-    bags_collected: toInt($('#impact-bags') && $('#impact-bags').value),
-    volunteer_minutes: toInt($('#impact-minutes') && $('#impact-minutes').value)
-  };
+  const body = { outcome_note: note };
   await action(btn, async () => {
     await client.completeTask(task.id, body);
     await refresh();
@@ -861,5 +906,18 @@ document.addEventListener('submit', e => {
   if (e.target.id === 'postcode-form') return postcodeSubmit(e.target, btn);
 });
 window.addEventListener('hashchange', () => { render(); window.scrollTo(0, 0); });
+
+/* Rotate the stories strip without a full repaint (a repaint would steal focus).
+   Guarded: the test sandbox has no timers, browsers do. */
+if (typeof setInterval === 'function') setInterval(() => {
+  if (!state.me || ui.busy) return;
+  const hash = location.hash || '#community';
+  if (hash && hash !== '#community') return;
+  const stories = streetStories();
+  if (stories.length <= 1) return;
+  ui.storyOffset = (ui.storyOffset || 0) + 1;
+  const row = document.getElementById('story-row');
+  if (row && row.classList.contains('story-row')) row.innerHTML = storyCards(stories);
+}, 4500);
 
 boot();

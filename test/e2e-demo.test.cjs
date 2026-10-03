@@ -78,7 +78,8 @@ test('bob lends, alice borrows: the full story through the real API client', asy
 
   /* ---- 5. alice creates the action ---- */
   app.run("location.hash='#task';render()");
-  assert.match(app.html(), /Pick an action above/, 'nothing exists until an action is chosen');
+  assert.match(app.html(), /Your tool checklist appears here once you pick a project/, 'the checklist explains itself before an action exists');
+  assert.match(app.html(), /requirement ghost/, 'template needs are previewed as ghost rows only');
   assert.equal(app.run('state.tasks.length'), 0, 'viewing the page invents nothing');
   assert.equal(app.run("state.templates.map(t=>t.id).join(',')"), 'park_cleanup,flowerbed_care', 'templates come from the API');
   app.click({ dataset: { template: 'park_cleanup' } });
@@ -155,16 +156,20 @@ test('bob lends, alice borrows: the full story through the real API client', asy
   assert.equal(app.run("state.tasks[0].requirements.find(r=>r.category==='litter_picker').state"), 'fulfilled');
   assert.equal(app.run("state.tasks[0].completion_eligible"), true, 'the backend now allows completion');
   app.element('#outcome-note').value = 'Cleared litter along the path with Bob.';
-  app.element('#impact-bags').value = '3';
-  app.element('#impact-minutes').value = '90';
   app.click({ id: 'complete-task' });
   await app.flush();
   assert.equal(app.run('state.tasks[0].status'), 'completed');
   assert.equal(app.run('state.tasks[0].outcome.note'), 'Cleared litter along the path with Bob.');
-  assert.equal(app.run('state.tasks[0].outcome.bags_collected'), 3);
-  assert.equal(app.run('state.tasks[0].outcome.volunteer_minutes'), 90);
+  assert.equal(app.run('state.tasks[0].outcome.bags_collected'), null, 'bags are no longer collected');
+  assert.equal(app.run('state.tasks[0].outcome.volunteer_minutes'), null, 'minutes are no longer collected');
   assert.equal(app.run('state.tasks[0].outcome.verification'), 'self_reported');
   assert.match(app.html(), /Cleared litter along the path with Bob\./, 'the recorded story stays readable');
+
+  /* the recorded story is published on the home page for the street to read */
+  app.run("location.hash='#community'; render();");
+  assert.match(app.html(), /Stories from the street/, 'home page carries the stories strip');
+  assert.match(app.html(), /Cleared litter along the path with Bob\./, 'the story text appears on the home page');
+  assert.match(app.html(), /class="story-card"/, 'stories render as cards');
 
   /* impact maths still comes from D's pure functions, now over API data */
   const report = JSON.parse(app.run("JSON.stringify(D.impactReport(state.tasks, state.loans, {communityId: state.me.community.id, tools: state.tools, names: state.names}))"));
@@ -172,9 +177,8 @@ test('bob lends, alice borrows: the full story through the real API client', asy
   assert.equal(by.completed_loans.value, 1);
   assert.equal(by.actions_with_tools_confirmed.value, 1);
   assert.equal(by.completed_actions.value, 1);
-  assert.equal(by.bags_collected.value, 3);
-  assert.equal(by.bags_collected.basis, 'self-reported');
-  assert.equal(by.volunteer_minutes.value, 90);
+  assert.equal(by.bags_collected.available, false, 'bags metric is honestly not-collected');
+  assert.equal(by.volunteer_minutes.available, false, 'minutes metric is honestly not-collected');
   assert.match(app.html(), /backend/, 'community counters from /impact are labelled as backend data');
 
   /* ---- 11. idempotency: every business write sent a fresh UUID key ---- */

@@ -113,12 +113,53 @@ DEMO_TOOLS = [
     },
 ]
 
+# 演示用「已完成行动」记录：主界面 Stories from the street 的样例数据。
+# 成果均为发起者自报（verification="self_reported"），bags/minutes 不再采集留 null。
+DEMO_STORIES = [
+    {
+        "id": "k8888881-8888-4888-8888-888888888881",
+        "creator_alias": "alice",
+        "template_id": "park_cleanup",
+        "title": "Saturday path clean-up",
+        "place_name": "Meadow path entrance",
+        "outcome_note": "Cleared litter along the meadow path with Bob. Two bags to the bin store.",
+        "hours_ago": 5,
+    },
+    {
+        "id": "k8888882-8888-4888-8888-888888888882",
+        "creator_alias": "bob",
+        "template_id": "flowerbed_care",
+        "title": "Corner shop flowerbeds",
+        "place_name": "Corner shop raised beds",
+        "outcome_note": "Watered and weeded the raised beds by the corner shop. The herbs look happy again.",
+        "hours_ago": 3,
+    },
+    {
+        "id": "k8888883-8888-4888-8888-888888888883",
+        "creator_alias": "dora",
+        "template_id": "park_cleanup",
+        "title": "Muir Wood Park edge pick",
+        "place_name": "Muir Wood Park edge",
+        "outcome_note": "Picked cans and wrappers along the park edge with Eve before the rain came.",
+        "hours_ago": 2,
+    },
+    {
+        "id": "k8888884-8888-4888-8888-888888888884",
+        "creator_alias": "eve",
+        "template_id": "flowerbed_care",
+        "title": "Colinton Road planters",
+        "place_name": "Colinton Road planters",
+        "outcome_note": "Weeded and replanted the planters on Colinton Road. Neighbours stopped to chat about the bulbs.",
+        "hours_ago": 1,
+    },
+]
+
 
 def seed(db_path: str | None = None) -> dict:
     """Insert seed rows if missing. Safe to run repeatedly."""
     migrate(db_path)
     now = utc_now()
-    stats = {"communities": 0, "users": 0, "templates": 0, "requirements": 0, "tools": 0}
+    stats = {"communities": 0, "users": 0, "templates": 0, "requirements": 0, "tools": 0, "stories": 0}
 
     with connection(db_path) as conn:
         with write_transaction(conn):
@@ -181,6 +222,35 @@ def seed(db_path: str | None = None) -> dict:
                     ),
                 )
                 stats["tools"] += cur.rowcount
+
+            for story in DEMO_STORIES:
+                creator_id = user_ids[story["creator_alias"]]
+                community_id = user_communities[story["creator_alias"]]
+                done_at = now - story["hours_ago"] * 3600
+                cur = conn.execute(
+                    "INSERT OR IGNORE INTO tasks "
+                    "(id, creator_id, community_id, template_id, title, "
+                    " place_name, place_latitude, place_longitude, place_source, "
+                    " place_source_id, status, outcome_note, bags_collected, "
+                    " volunteer_minutes, created_at, completed_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'fixture', NULL, 'completed', ?, NULL, NULL, ?, ?)",
+                    (
+                        story["id"], creator_id, community_id, story["template_id"],
+                        story["title"], story["place_name"],
+                        next(c["latitude"] for c in COMMUNITIES if c["id"] == community_id),
+                        next(c["longitude"] for c in COMMUNITIES if c["id"] == community_id),
+                        story["outcome_note"], done_at - 3600, done_at,
+                    ),
+                )
+                stats["stories"] += cur.rowcount
+                # Mirror the template requirements so detail views stay consistent.
+                for category, quantity in TASK_TEMPLATES[story["template_id"]]["requirements"]:
+                    conn.execute(
+                        "INSERT OR IGNORE INTO task_requirements "
+                        "(id, task_id, category, quantity, self_supplied, created_at) "
+                        "VALUES (?, ?, ?, ?, 1, ?)",
+                        (f"{story['id']}-{category}", story["id"], category, quantity, done_at - 3600),
+                    )
 
     return stats
 
