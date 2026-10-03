@@ -10,7 +10,12 @@ Keys are normalised compact postcodes (no spaces, upper case), matching
 C's ``normalize_postcode``. C's origin/main data covered EH14 4AS and
 EH1 1YZ (its docstring also advertised EH8 9YL); the EH8 9YL entry below
 completes that advertised set for the University of Edinburgh / George
-Square area, in the same shape as C's entries.
+Square area, in the same shape as C's entries. The EH8 9AB entry gives the
+seeded home community an honest offline fallback (still served with
+``source_kind="fixture"``, never "live"), so the demo renders without
+live Overpass / Open-Meteo / NESO. The other seeded community, EH16 5AA,
+is deliberately left fixture-free so the degraded / no-fixture path stays
+covered by the backend tests.
 """
 
 from __future__ import annotations
@@ -200,6 +205,81 @@ DEMO_CACHE: dict[str, dict] = {
                 "distance_km": 0.3,
                 "latitude": 55.9450,
                 "longitude": -3.1900,
+            },
+        ],
+    },
+    "EH89AB": {
+        "postcode": "EH8 9AB",
+        "location": {
+            "district": "City of Edinburgh",
+            "parish": "University of Edinburgh / Southside",
+            "outcode": "EH8",
+            "latitude": 55.944703,
+            "longitude": -3.187417,
+            "description": "University of Edinburgh / Southside Community",
+        },
+        "air_quality": {
+            "status": "Fair",
+            "aqi": 26,
+            "pm2_5": 6.4,
+            "pm10": 11.9,
+            "source": "Open-Meteo Air Quality (11km regional grid forecast)",
+            "timestamp": "2026-10-03T10:00:00Z",
+            "is_cached": True,
+        },
+        "carbon_intensity": {
+            "index": "low",
+            "forecast": 40,
+            "unit": "gCO2/kWh",
+            "clean_energy_percentage": 73.4,
+            "top_source": "Wind (58.1%)",
+            "source": "NESO Carbon Intensity API (National Grid ESO)",
+            "timestamp": "2026-10-03T10:00:00Z",
+            "is_cached": True,
+        },
+        # Real Overpass coordinates for central Edinburgh green spaces, with
+        # straight-line distances from the seeded EH8 9AB community
+        # (55.944703, -3.187417). Field shape matches the other entries.
+        "green_spaces": [
+            {
+                "id": "george-square-gardens",
+                "name": "George Square Gardens",
+                "type": "Public Urban Park",
+                "distance_km": 0.1,
+                "latitude": 55.9441,
+                "longitude": -3.1887,
+            },
+            {
+                "id": "bristo-square",
+                "name": "Bristo Square",
+                "type": "Civic Square & Green",
+                "distance_km": 0.2,
+                "latitude": 55.9450,
+                "longitude": -3.1900,
+            },
+            {
+                "id": "the-meadows",
+                "name": "The Meadows",
+                "type": "Community Green Space",
+                "distance_km": 0.5,
+                "latitude": 55.9412,
+                "longitude": -3.1925,
+            },
+            {
+                "id": "princes-street-gardens",
+                "name": "Princes Street Gardens",
+                "type": "Public Urban Park",
+                "distance_km": 0.9,
+                "latitude": 55.9508,
+                "longitude": -3.1970,
+            },
+            {
+                "id": "holyrood-park",
+                "name": "Holyrood Park",
+                "type": "Royal Natural Park",
+                "distance_km": 1.5,
+                "latitude": 55.9510,
+                "longitude": -3.1670,
             },
         ],
     },
