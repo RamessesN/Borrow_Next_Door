@@ -220,7 +220,7 @@ test('ensureRequirements migrates a pre-B task in place', () => {
   assert.equal(gloves.state, 'self_supplied');
   assert.equal(legacy.requirements.find(r => r.category === 'litter_picker').state, 'missing');
   assert.equal(legacy.coordination_ready, false);
-  assert.equal(legacy.completion_eligible, false);
+  assert.equal(legacy.completion_eligible, true, 'missing does not block recording');
 
   assert.equal(D.ensureRequirements(legacy).migrated, false, 'a second pass is a no-op');
 });
@@ -543,8 +543,8 @@ test('bringing your own is self_supplied and never a claim on a neighbour', () =
     { ok: false, reason: 'slot_is_self_provided' });
 
   const flags = D.taskFlags(task, ctx(task, [], []));
-  assert.deepEqual(flags, { coordination_ready: false, completion_eligible: false },
-    'the picker requirement is still missing');
+  assert.deepEqual(flags, { coordination_ready: false, completion_eligible: true },
+    'a missing requirement never blocks recording');
 });
 
 test('slotIsClaimed follows the frozen states and a declined request releases the requirement', () => {
@@ -629,7 +629,7 @@ test('taskProgress rolls requirements into one honest figure', () => {
     [2, 0, 0, 2, 0]);
   assert.equal(p.complete, false);
   assert.equal(p.coordinationReady, false);
-  assert.equal(p.completionEligible, false);
+  assert.equal(p.completionEligible, true, 'two missing requirements are still recordable');
   assert.deepEqual(p.missingCategories, ['litter_picker', 'reusable_gloves']);
   assert.match(p.nextAction, /Find a neighbour with the first tool/);
 
@@ -782,9 +782,9 @@ test('outcomeReadiness mirrors the backend completion gate and only warns about 
   const context = () => ctx(task, tools, loans);
 
   let ready = D.outcomeReadiness(task, context());
-  assert.equal(ready.canSubmit, false, 'nothing is arranged yet');
+  assert.equal(ready.canSubmit, true, 'missing tools never block recording');
   assert.equal(ready.unconfirmedRequirements, 2);
-  assert.match(ready.warning, /can be recorded once/);
+  assert.equal(ready.warning, null, 'no unresolved request, no gate warning');
 
   loans.push(D.createLoanRequest(tools[0], task, picker, 'alice', () => 'L1', context()).request);
   assert.equal(D.setSlotSource(task, gloves.id, 'self').ok, true);
@@ -881,7 +881,7 @@ test('syncRequirements stores the derived state the backend would send', () => {
   assert.deepEqual(picker.candidate_tool_ids, ['p1']);
   assert.equal(gloves.state, 'self_supplied');
   assert.deepEqual(D.taskFlags(task, { task, tools, loans: [], names: OWNERS }),
-    { coordination_ready: false, completion_eligible: false });
+    { coordination_ready: false, completion_eligible: true });
 
   const loans = [D.createLoanRequest(tools[0], task, picker, 'alice', () => 'L1',
     { task, tools, loans: [], names: OWNERS }).request];

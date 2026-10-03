@@ -203,8 +203,12 @@ def build_task_data(
         coordination_ready = all(
             r["state"] in COORDINATION_STATES for r in requirements
         )
+        # Product decision 2026-10-03: recording is blocked only while a
+        # request is still unresolved (pending / confirmed). A missing tool no
+        # longer forces the organiser to tick self-supply — outcomes are
+        # self-reported and the checklist is guidance, not a gate.
         completion_eligible = all(
-            r["state"] in COMPLETION_STATES for r in requirements
+            r["state"] not in ("pending", "confirmed") for r in requirements
         )
     else:  # pragma: no cover - templates always ship >=1 requirement
         coordination_ready = False
