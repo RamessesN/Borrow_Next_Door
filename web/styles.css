@@ -88,3 +88,20 @@
 .place-option b{display:block;font-size:12px}
 .place-option small{display:block;font-size:10px;color:var(--muted);margin-top:2px}
 .place-option.disabled{opacity:.55;cursor:not-allowed}
+
+/* ---- Stories from the street strip ---- */
+.stories-strip{margin:34px 0 6px}
+.story-row{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:15px}
+.story-card{background:#fff;border:1px solid var(--line);border-radius:12px;padding:18px 18px 14px;display:flex;flex-direction:column;gap:12px;min-height:118px}
+.story-card p{margin:0;font-size:12.5px;line-height:1.7;color:var(--ink);flex:1}
+.story-card footer{display:flex;flex-direction:column;gap:2px;border-top:1px solid #eff0e9;padding-top:9px}
+.story-card footer b{font-size:11.5px;color:var(--green)}
+.story-card footer span{font-size:10px;color:var(--muted)}
+.stories-empty{border:1px dashed #d4dccc;border-radius:12px;padding:22px;text-align:center;color:var(--muted);font-size:12px}
+@media(max-width:720px){.story-row{grid-template-columns:1fr}}
+
+/* ---- Tell the story: fixed two-slot skeleton for every user ---- */
+.story-latest,.story-form{display:block;margin:0 0 6px}
+.story-latest .eyebrow,.story-form .eyebrow{margin-bottom:8px;color:var(--muted)}
+.story-form{border-top:1px solid var(--line);margin-top:16px;padding-top:16px}
+.story-quote{background:#f7f8f1;border-left:3px solid #9db88a;border-radius:8px;padding:12px 14px;font-size:12.5px;line-height:1.7}

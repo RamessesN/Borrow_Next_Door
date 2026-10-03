@@ -541,7 +541,10 @@
       }
     });
     pins.forEach(function (p) {
-      var id = esc(p.tool.id), title = safeCaption(p.tool.name || 'Tool');
+      var id = esc(p.tool.id);
+      var who0 = safeCaption(p.tool.owner_name || '');
+      var what0 = safeCaption(p.tool.name || 'Tool');
+      var title = who0 ? (who0 + ' · ' + what0) : what0;
       if (p.nearest) {
         svg.push('<circle class="nearest-halo" data-layer="outer" cx="' + fmt(p.x) + '" cy="' + fmt(p.y) +
           '" r="12" fill="none" stroke="' + colors.closest + '" stroke-width="4" opacity="0.15"/>');
@@ -606,23 +609,25 @@
         '" fill="' + colors.ink + '" font-family="system-ui, sans-serif">' + esc(value) + '</text>');
       return true;
     }
-    if (closestPin) label(closestPin, closestPin.tool.name || 'Closest', 'nearest-label');
+    // Every borrowable tool gets a visible "who · what" label — the map is
+    // about neighbours' tools, not about the park names (those stay in the
+    // tooltip and in the green-space list below the card).
+    var pinOrder = pins.slice().sort(function (a, b) {
+      if (a.nearest !== b.nearest) return a.nearest ? -1 : 1;
+      return String(a.tool.id).localeCompare(String(b.tool.id));
+    });
+    pinOrder.forEach(function (p) {
+      var who = safeCaption(p.tool.owner_name || '');
+      var what = safeCaption(p.tool.name || 'Tool');
+      var text = p.nearest ? ((who ? who + ' · ' : '') + what) : (who || what);
+      label(p, text, p.nearest ? 'nearest-label' : 'tool-label');
+    });
     if (origin) label(origin, 'You', 'you-label');
-    var visibleGreens = greenPoints.slice().sort(function (a, b) {
-      return (you ? haversineMeters(you, a.green) - haversineMeters(you, b.green) : a.y - b.y);
-    }).slice(0, 3).sort(function (a, b) { return a.y - b.y; });
-    var labeledGreens = 0;
-    visibleGreens.forEach(function (p) { if (label(p, p.green.name || 'Green space', 'greenspace-label')) labeledGreens++; });
-    if (greens.length > labeledGreens) {
-      svg.push('<text class="greenspace-more" x="' + (width - mR) + '" y="' + (height - 39) +
-        '" text-anchor="end" font-size="7" fill="' + colors.muted +
-        '" font-family="system-ui, sans-serif">+' + (greens.length - labeledGreens) + ' green spaces</text>');
-    }
 
     // --- legend -----------------------------------------------------------
     var legend = [
       { label: 'You', kind: 'you', span: 46 },
-      { label: 'Borrowable', kind: 'tool', span: 88 },
+      { label: "Neighbours' tools", kind: 'tool', span: 104 },
       { label: 'Closest', kind: 'closest', span: 69 },
       { label: 'Green space', kind: 'green', span: 85 }
     ];

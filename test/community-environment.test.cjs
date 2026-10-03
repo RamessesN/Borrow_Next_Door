@@ -712,8 +712,10 @@ test('selecting a green space creates an OSM action with the provider name, coor
   assert.equal(place.source, 'osm');
   assert.equal(place.latitude, GREEN[1].latitude);
   assert.equal(place.longitude, GREEN[1].longitude);
-  assert.match(app.html(), /id="place-name" value="George Square Gardens" maxlength="120" readonly/);
-  assert.doesNotMatch(app.html(), /name="task-place"/, 'open actions expose no place editor');
+  assert.match(app.html(), /George Square Gardens/, 'the locked panel still names the meeting point');
+  assert.match(app.html(), /Meeting point of your in-progress action/, 'the panel marks the point as locked');
+  assert.equal((app.html().match(/name="task-place"(?![^>]*disabled)/g) || []).length, 0,
+    'open actions expose no editable place control');
   selectPlace(app, 'osm-1');
   assert.equal(app.run('myOpenTask().place.name'), 'George Square Gardens', 'a forged change cannot edit an open action');
   assert.equal(placesSent.length, 1);

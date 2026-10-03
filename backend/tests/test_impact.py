@@ -111,7 +111,8 @@ def test_impact_counts_from_application_rows(client, alice_token, db_path):
     # 1 returned loan counted; the pending one is not.
     assert data["returned_loans_count"] == 1
     # 1 completed task counted; the open one is not.
-    assert data["completed_tasks_count"] == 1
+    # 1 fixture row + 2 seeded demo stories on EH8 9AB
+    assert data["completed_tasks_count"] == 3
 
 
 def test_impact_empty_community_counts_are_zero(client, alice_token):

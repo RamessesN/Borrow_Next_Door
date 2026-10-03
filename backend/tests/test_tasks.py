@@ -334,8 +334,8 @@ def test_list_tasks_scopes_and_pagination(client, alice_token, bob_token, settin
     resp = client.get(f"{API}/tasks", headers=headers(alice_token))
     assert resp.status_code == 200, resp.text
     body = resp.json()
-    assert body["meta"]["total"] == 3
-    assert len(body["data"]) == 3
+    assert body["meta"]["total"] == 4  # 3 fixture + 1 seeded demo story
+    assert len(body["data"]) == 4  # 3 fixture + 1 seeded demo story
     assert {t["creator"]["id"] for t in body["data"]} == {alice_id}
     for item in body["data"]:
         assert "requirements" not in item
@@ -362,11 +362,11 @@ def test_list_tasks_scopes_and_pagination(client, alice_token, bob_token, settin
     page2 = client.get(
         f"{API}/tasks?limit=2&offset=2", headers=headers(alice_token)
     ).json()
-    assert len(page1["data"]) == 2 and page1["meta"]["total"] == 3
+    assert len(page1["data"]) == 2 and page1["meta"]["total"] == 4
     assert page1["meta"]["limit"] == 2 and page1["meta"]["offset"] == 0
-    assert len(page2["data"]) == 1 and page2["meta"]["total"] == 3
+    assert len(page2["data"]) == 2 and page2["meta"]["total"] == 4
     ids = {t["id"] for t in page1["data"]} | {t["id"] for t in page2["data"]}
-    assert len(ids) == 3  # stable, non-overlapping pages
+    assert len(ids) == 4  # stable, non-overlapping pages (3 fixture + 1 seeded story)
 
     # scope=community requires community_id.
     resp = client.get(f"{API}/tasks?scope=community", headers=headers(alice_token))
@@ -386,7 +386,7 @@ def test_list_tasks_scopes_and_pagination(client, alice_token, bob_token, settin
         headers=headers(alice_token),
     )
     assert resp.status_code == 200, resp.text
-    assert resp.json()["meta"]["total"] == 4
+    assert resp.json()["meta"]["total"] == 6  # 4 fixture + 2 seeded demo stories
     assert {t["creator"]["id"] for t in resp.json()["data"]} == {
         alice_id,
         user_id(settings, "bob"),
@@ -1033,7 +1033,7 @@ def test_create_task_idempotent_replay_and_key_reuse(client, alice_token):
 
     # Only one task was actually created.
     listing = client.get(f"{API}/tasks", headers=headers(alice_token))
-    assert listing.json()["meta"]["total"] == 1
+    assert listing.json()["meta"]["total"] == 2  # 1 created here + 1 seeded demo story
 
     # Same key, different intent -> 409.
     third = client.post(

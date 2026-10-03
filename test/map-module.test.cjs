@@ -322,17 +322,30 @@ test('screen-space separation survives shared coordinates and a 10km+ extent', (
   assert.ok(svg.includes('pin-leader'), 'displaced points retain geographic connectors');
 });
 
-test('green-space labels are capped and label pills do not collide with pins or each other', () => {
+test('tool pins carry owner labels, green-space names stay off the map, pills do not collide', () => {
   const greenspaces = Array.from({ length: 7 }, (_, i) => ({
     id: `green-${i}`, name: `Neighbourhood green ${i}`, latitude: YOU.latitude, longitude: YOU.longitude
   }));
-  const result = M.planNearestRoute(YOU, [NEAR, MID, FAR, CLOSE]);
-  const svg = M.renderMapSVG({ you: YOU, tools: [NEAR, MID, FAR, CLOSE], greenspaces,
+  const withOwners = [
+    { ...NEAR, owner_name: 'Dora', name: 'Secateurs' },
+    { ...MID, owner_name: 'Eve', name: 'Watering can' },
+    { ...FAR, owner_name: 'Bob', name: 'Gloves' },
+    { ...CLOSE, owner_name: 'Alice', name: 'Trowel' }
+  ];
+  const result = M.planNearestRoute(YOU, withOwners);
+  const svg = M.renderMapSVG({ you: YOU, tools: withOwners, greenspaces,
     nearest: result.nearest, path: result.path });
   assert.equal((svg.match(/class="greenspace"/g) || []).length, 7, 'all green-space marks retained');
-  const count = (svg.match(/class="greenspace-label"/g) || []).length;
-  assert.equal(count, 3, 'only nearest three receive names');
-  assert.match(svg, />\+4 green spaces</);
+  assert.equal((svg.match(/class="greenspace-label"/g) || []).length, 0,
+    'green-space names are not drawn on the map (list below the card owns them)');
+  assert.equal((svg.match(/class="tool-label"/g) || []).length, 3,
+    'every ordinary borrowable pin gets an owner label');
+  assert.match(svg, /class="nearest-label"/, 'the closest pin is labelled too');
+  assert.match(svg, /Dora · Secateurs/, 'the closest pin names the owner and the tool');
+  for (const who of ['Eve', 'Bob', 'Alice']) {
+    assert.ok(svg.includes(who), `owner ${who} is visible on the map`);
+  }
+  assert.match(svg, /<title>[^<]*Eve · Watering can<\/title>/, 'tooltips carry owner · tool');
   const boxes = [...svg.matchAll(/class="map-label-bg" x="([^"]+)" y="([^"]+)" width="([^"]+)" height="([^"]+)"/g)]
     .map(m => ({ x: +m[1], y: +m[2], w: +m[3], h: +m[4] }));
   for (let i = 0; i < boxes.length; i++) {
@@ -349,7 +362,6 @@ test('green-space labels are capped and label pills do not collide with pins or 
     }
   }
 });
-
 test('names, captions and tooltip copy are escaped and forbidden wording is stripped', () => {
   const t = tool('special', 55.95, -3.18, { name: 'Walking <spade> & navigation 导航' });
   const svg = M.renderMapSVG({ you: YOU, tools: [t], nearest: t,
