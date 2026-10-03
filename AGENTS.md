@@ -3,7 +3,7 @@
 4 人 hackathon 项目（AdaHack 2026 · Greener by Postcode）：邻居共享工具 + 社区环境数据。
 `web/` 是无构建步骤的原生 JS 前端，`backend/` 是 FastAPI + SQLite，两套测试各自独立。
 
-分工与截止纪律见 `Borrow_Next_Door_项目方案与四人分工.md`；各文件头部注释也标了 owner：
+分工与截止纪律见 `docs/Borrow_Next_Door_项目方案与四人分工.md`；各文件头部注释也标了 owner：
 A = 前端外壳与集成（`web/app.js`、`web/index.html`、`web/styles.css`）、B = 后端与数据契约（`backend/`）、
 C = 环境数据适配器（`backend/app/adapters/`）、D = 任务匹配与成果（`web/task-module.js`）。
 跨 owner 改动请在同一条 PR 里说明，不要顺手重写别人的模块。
@@ -47,6 +47,7 @@ npm run check                  # 对 6 个 JS 文件跑 node --check
 
 ## 团队约定
 
-- `main` 是集成分支且多人同时在推；PR 按成员前缀命名（`b-` / `d-` …）、描述用中文，**允许自行 merge**——但 merge 前必须自己跑通 `npm run check` + 两个测试套件，merge 后 main 必须保持绿。
-- 文档里的数字与行为经常滞后（`docs/handoff/*` 与 README 里仍写着 156 项测试、已删除的 browse 行为）：**以命令输出和代码为准**，改行为时顺手修掉你碰到的过期段落。
-- 比赛简报明确"不鼓励过度依赖 AI，疑似过度依赖可能扣分"（见 plan §11）：改动要能被队友解释，不要提交无法说明来由的大段生成代码。
+- `main` 是集成分支且多人同时在推；PR 按成员前缀命名（`b-` / `d-` …），**允许自行 merge**——但 merge 前必须自己跑通 `npm run check` + 两个测试套件，merge 后 main 必须保持绿。
+- 描述语言跟随你改动的模块：README 已转英文并由 B 维护，`docs/handoff/*` 与 plan 文档仍是中文。
+- 文档里的数字与行为经常滞后（`docs/handoff/*` 仍写着 156 项测试、已删除的 browse 行为）：**以命令输出和代码为准**，改行为时顺手修掉你碰到的过期段落。
+- 比赛简报明确"不鼓励过度依赖 AI，疑似过度依赖可能扣分"（见 `docs/Borrow_Next_Door_项目方案与四人分工.md` §11）：改动要能被队友解释，不要提交无法说明来由的大段生成代码。
