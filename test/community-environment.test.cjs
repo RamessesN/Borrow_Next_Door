@@ -9,6 +9,8 @@
  */
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
 const { createApp, createMockBackend } = require('./harness.cjs');
 
 async function signIn(app, alias) {
@@ -277,7 +279,7 @@ test('no borrowable tools produces the no_tools message without a route or close
   assert.match(card, /class="green-list"/, 'the green-space section is preserved');
 });
 
-test('browsing recomputes the map from home to visible tools, respects filters and uses honest UI copy', async () => {
+test('checking another postcode moves the account and recomputes the map, filters and honest UI copy', async () => {
   const app = createApp();
   await app.flush();
   await signIn(app, 'alice');
@@ -286,18 +288,23 @@ test('browsing recomputes the map from home to visible tools, respects filters a
   app.element('#postcode').value = 'EH14 4AS';
   app.submit('#postcode-form', {});
   await app.flush();
-  const browsedGreen = [{ id: 'colinton-green', name: 'Colinton Green', distance_km: 0.1,
+  assert.equal(app.run('state.me.community.postcode'), 'EH14 4AS', 'the account really moved');
+  assert.equal(app.run('state.me.community.outcode'), 'EH14');
+  assert.equal(app.run('state.tools.map(t => t.name).join(",")'), 'Colinton wheelbarrow',
+    'the tool list is the moved-to community\'s, fetched after the move');
+  const movedGreen = [{ id: 'colinton-green', name: 'Colinton Green', distance_km: 0.1,
     latitude: 55.9045, longitude: -3.249 }];
-  app.run(`state.browseEnvironment = ${JSON.stringify(providers(browsedGreen, AIR, CARBON))}; render();`);
+  app.run(`state.environment = ${JSON.stringify(providers(movedGreen, AIR, CARBON))}; render();`);
   const expected = app.run(`M.describeNearest(M.planNearestRoute(state.me.community,
-    state.browseTools.map(t => ({ ...t, latitude: t.community.latitude, longitude: t.community.longitude }))))`);
+    state.tools.map(t => ({ ...t, latitude: t.community.latitude, longitude: t.community.longitude }))))`);
   const card = mapCardHTML(app);
-  assert.ok(card.includes(expected), 'route starts at the home coordinates, not the browsed centre');
+  assert.ok(card.includes(expected), 'the route starts at the moved-to home community');
   assert.match(card, /Closest: Colinton wheelbarrow/);
   assert.match(card, /<polyline class="route"/);
   assert.match(card, /Colinton Green/);
-  assert.doesNotMatch(card, /The Meadows/, 'both the map and list use the browsed environment');
+  assert.doesNotMatch(card, /The Meadows/, 'both the map and list use the moved-to community\'s environment');
   assert.match(app.html(), /id="back-home"/);
+  assert.match(app.html(), /Back to my previous street/);
   assert.doesNotMatch(app.html(), /walk|navigat|导航/i, 'the UI never claims pedestrian or turn-by-turn guidance');
 
   app.click({ dataset: { filter: 'cleanup' } });
@@ -312,12 +319,13 @@ test('browsing recomputes the map from home to visible tools, respects filters a
 
   app.click({ id: 'back-home' });
   await app.flush();
+  assert.equal(app.run('state.me.community.postcode'), 'EH8 9AB', 'back restores the previous community');
   assert.match(mapCardHTML(app), /No borrowable tools nearby yet/, 'returning home recomputes the route');
   assert.doesNotMatch(mapCardHTML(app), /Colinton wheelbarrow|Colinton Green/);
   assert.doesNotMatch(app.html(), /walk|navigat|导航/i);
 });
 
-test('checking your own postcode keeps the home view instead of browsing', async () => {
+test('checking your own postcode is a confirmed no-op', async () => {
   const app = createApp();
   await app.flush();
   await signIn(app, 'alice');
@@ -327,13 +335,15 @@ test('checking your own postcode keeps the home view instead of browsing', async
   app.element('#postcode').value = home;
   app.submit('#postcode-form', {});
   await app.flush();
-  assert.equal(app.run('state.browse'), null, 'the home postcode must not enter browsing mode');
+  assert.equal(app.run('state.me.community.postcode'), home, 'the account stays on its own street');
+  assert.equal(app.run('state.previousHomePostcode'), null, 'no move means nothing to return to');
   assert.equal(app.element('#toast').textContent, `${home} is already your home street.`);
-  assert.doesNotMatch(app.html(), /id="back-home"/, 'no browse banner for the home postcode');
-  assert.doesNotMatch(app.html(), /Browsing /);
+  assert.doesNotMatch(app.html(), /id="back-home"/, 'no back control for a no-op');
+  assert.equal(app.server.writes.filter(w => w.path.endsWith('/api/v1/me/community')).length, 0,
+    'the confirmed no-op never writes the move endpoint');
 });
 
-test('browsing another postcode and then checking your own returns to the home view', async () => {
+test('checking another postcode then the back control restores the previous street', async () => {
   const app = createApp();
   await app.flush();
   await signIn(app, 'alice');
@@ -341,17 +351,70 @@ test('browsing another postcode and then checking your own returns to the home v
   app.element('#postcode').value = 'EH14 4AS';
   app.submit('#postcode-form', {});
   await app.flush();
-  assert.ok(app.run('state.browse'), 'browsing another postcode sets the browse state');
+  assert.equal(app.run('state.me.community.postcode'), 'EH14 4AS', 'the account moved to the checked street');
+  assert.equal(app.run('state.previousHomePostcode'), 'EH8 9AB', 'the previous street is remembered');
+  assert.equal(app.element('#toast').textContent, 'You are now in EH14 4AS.');
   assert.match(app.html(), /id="back-home"/);
-  app.element('#postcode').value = 'EH8 9AB';
-  app.submit('#postcode-form', {});
+  assert.match(app.html(), /Back to my previous street/);
+  assert.equal(app.stored.get('bnd.previousHomePostcode'), 'EH8 9AB',
+    'the previous street is persisted so the way back can survive a reload');
+
+  app.click({ id: 'back-home' });
   await app.flush();
-  assert.equal(app.run('state.browse'), null, 'checking the home postcode clears browsing');
+  assert.equal(app.run('state.me.community.postcode'), 'EH8 9AB', 'back restores the previous community');
+  assert.equal(app.run('state.previousHomePostcode'), null, 'the reminder clears once used');
+  assert.equal(app.stored.get('bnd.previousHomePostcode'), undefined, 'the persisted hint is dropped once used');
   assert.equal(app.element('#toast').textContent, 'Back to your street: EH8 9AB.');
-  assert.doesNotMatch(app.html(), /id="back-home"/, 'the browse banner is gone again');
+  assert.doesNotMatch(app.html(), /id="back-home"/, 'the control is gone again');
 });
 
-test('the context score follows the browsed postcode instead of the home community', async () => {
+test('the previous-street hint survives a reload and still moves through the API', async () => {
+  const server = createMockBackend();
+  const first = createApp({ server });
+  await first.flush();
+  await signIn(first, 'alice');
+  first.element('#postcode').value = 'EH14 4AS';
+  first.submit('#postcode-form', {});
+  await first.flush();
+  assert.equal(first.run('state.me.community.postcode'), 'EH14 4AS');
+  const token = first.stored.get('bnd.token');
+  assert.equal(first.stored.get('bnd.previousHomePostcode'), 'EH8 9AB',
+    'the previous street is stored under the UI-prefs key');
+
+  // A fresh page holding the same session token is a reload: /me stays the
+  // authority (still EH14 4AS) and the way back is rebuilt from the stored hint.
+  const reloaded = createApp({ server, storage: {
+    'bnd.token': token, 'bnd.previousHomePostcode': 'EH8 9AB'
+  } });
+  await reloaded.flush();
+  assert.equal(reloaded.run('state.me.community.postcode'), 'EH14 4AS', 'the server /me is the authority');
+  assert.equal(reloaded.run('state.previousHomePostcode'), 'EH8 9AB', 'the way back survives a reload');
+  assert.match(reloaded.html(), /Back to my previous street/);
+  assert.match(reloaded.html(), /Your previous street is EH8 9AB/);
+
+  reloaded.click({ id: 'back-home' });
+  await reloaded.flush();
+  assert.equal(reloaded.run('state.me.community.postcode'), 'EH8 9AB', 'the restored control still moves via the API');
+  assert.equal(reloaded.stored.get('bnd.previousHomePostcode'), undefined, 'the hint is dropped once used');
+  assert.doesNotMatch(reloaded.html(), /id="back-home"/);
+});
+
+test('a stored previous street that equals the current home is dropped, not offered', async () => {
+  const server = createMockBackend();
+  const first = createApp({ server });
+  await first.flush();
+  await signIn(first, 'alice');
+  const token = first.stored.get('bnd.token');
+
+  // Stale hint: the account never moved, so EH8 9AB is not somewhere to go back to.
+  const app = createApp({ server, storage: { 'bnd.token': token, 'bnd.previousHomePostcode': 'EH8 9AB' } });
+  await app.flush();
+  assert.equal(app.run('state.previousHomePostcode'), null, 'a hint pointing at home is dropped');
+  assert.equal(app.stored.get('bnd.previousHomePostcode'), undefined, 'the stale key is removed from storage');
+  assert.doesNotMatch(app.html(), /id="back-home"/);
+});
+
+test('the context score follows the checked postcode instead of the old home community', async () => {
   const app = createApp();
   await app.flush();
   await signIn(app, 'alice');
@@ -362,28 +425,131 @@ test('the context score follows the browsed postcode instead of the home communi
   app.element('#postcode').value = 'EH14 4AS';
   app.submit('#postcode-form', {});
   await app.flush();
-  assert.ok(app.run('state.browse'), 'browse mode is active');
+  assert.equal(app.run('state.me.community.outcode'), 'EH14', 'the account moved to EH14');
 
-  // The browsed community's own providers: a different AQI and clean share.
-  const browsed = providers(
+  // The new community's own providers: a different AQI and clean share.
+  const moved = providers(
     [{ id: 'colinton-green', name: 'Colinton Green', distance_km: 0.2, latitude: 55.9045, longitude: -3.249 }],
     { aqi: 81, source: 'Open-Meteo Air Quality', scope: 'Regional forecast (~11km grid)' },
     { clean_energy_percentage: 46.6, index: 'moderate', forecast: 150, unit: 'gCO2/kWh',
       top_source: 'Gas', source: 'NESO Carbon Intensity API', scope: 'Regional grid zone (EH14)' }
   );
-  app.run(`state.browseEnvironment = ${JSON.stringify(browsed)}; render();`);
+  app.run(`state.environment = ${JSON.stringify(moved)}; render();`);
 
   const viewed = JSON.parse(app.run('JSON.stringify(greenContextScore())'));
   assert.equal(viewed.components.find(c => c.key === 'air_quality').points, 3, 'AQI 81 falls in the lowest band');
   assert.equal(viewed.components.find(c => c.key === 'carbon_intensity').points, 14, '46.6% clean rounds to 14');
-  assert.equal(viewed.value, 22 + 3 + 14, 'the total is recomputed from the browsed providers');
-  assert.notEqual(viewed.value, home.value, 'the score changes with the browsed postcode');
+  assert.equal(viewed.value, 22 + 3 + 14, 'the total is recomputed from the moved-to providers');
+  assert.notEqual(viewed.value, home.value, 'the score changes with the checked postcode');
 
   const html = app.html();
-  assert.match(html, /score-total"><strong>39<\/strong>/, 'the browsed total is rendered');
-  assert.doesNotMatch(html, /score-total"><strong>84<\/strong>/, 'the home total is gone');
-  assert.match(html, /Regional grid zone \(EH14\)/, 'the browsed electricity scope is shown');
-  assert.doesNotMatch(html, /Regional grid zone \(EH8\)/, 'the home electricity scope is gone');
+  assert.match(html, /score-total"><strong>39<\/strong>/, 'the moved-to total is rendered');
+  assert.doesNotMatch(html, /score-total"><strong>84<\/strong>/, 'the old home total is gone');
+  assert.match(html, /Regional grid zone \(EH14\)/, 'the moved-to electricity scope is shown');
+  assert.doesNotMatch(html, /Regional grid zone \(EH8\)/, 'the old home electricity scope is gone');
+});
+
+test('browse-era plumbing is gone: one home context follows the checked postcode', async () => {
+  const source = fs.readFileSync(path.resolve(__dirname, '..', 'web', 'app.js'), 'utf8');
+  assert.doesNotMatch(source, /state\.browse|browseTools|browseEnvironment|currentCommunity|visibleEnvironment|visibleTools/,
+    'no read-only browse context survives in app.js');
+  const app = createApp();
+  await app.flush();
+  await signIn(app, 'alice');
+  assert.equal(app.run('state.browse'), undefined, 'the account has no separate browse state');
+  assert.equal(app.run('state.previousHomePostcode'), null, 'only the previous-street reminder is kept');
+
+  // The one home context really follows a move: the account writes /me/community
+  // and re-reads every surface from it, with no browse state anywhere.
+  app.element('#postcode').value = 'EH14 4AS';
+  app.submit('#postcode-form', {});
+  await app.flush();
+  assert.equal(app.run('state.me.community.postcode'), 'EH14 4AS', 'the one context follows the move');
+  assert.ok(app.server.writes.some(w => w.status === 200 && w.path.endsWith('/api/v1/me/community')),
+    'the move is a real 200 write to /api/v1/me/community, not a browse switch');
+});
+
+test('the header, tools request, environment and score all follow the moved community id', async () => {
+  const app = createApp();
+  await app.flush();
+  await signIn(app, 'alice');
+  inject(app, providers(GREEN, AIR, CARBON));
+  const otherId = app.server.otherCommunity.id;
+
+  app.element('#postcode').value = 'EH14 4AS';
+  app.submit('#postcode-form', {});
+  await app.flush();
+
+  assert.equal(app.run('state.me.community.id'), otherId, 'the account points at the new community');
+  assert.equal(app.element('#whoami').textContent, 'Alice · EH14', 'the header identity follows the move');
+  assert.ok(app.server.calls.some(c => c.path.includes(`community_id=${otherId}`)),
+    'the tool list is requested for the new community');
+  assert.ok(app.server.calls.some(c => c.path.endsWith(`/communities/${otherId}/environment`)),
+    'the environment is fetched for the new community');
+  assert.equal(app.run('state.environment.postcode.data.postcode'), 'EH14 4AS',
+    'the shown environment is the new community\'s');
+  assert.equal(app.run('state.tools.map(t => t.community.postcode).join(",")'), 'EH14 4AS',
+    'every listed tool belongs to the new community');
+  assert.equal(app.run('homePostcode()'), 'EH14 4AS');
+  assert.match(app.html(), /Environmental context for EH14 4AS/, 'the environment copy follows too');
+  app.click({ dataset: { publish: true } });
+  assert.equal(app.element('#publish-postcode').textContent, 'EH14 4AS', 'publishing points at the new street');
+  assert.equal(app.element('#publish-owner').textContent, 'Alice');
+});
+
+test('the impact banner follows the moved community counters, not the old home ones', async () => {
+  const app = createApp();
+  await app.flush();
+  await signIn(app, 'alice');
+  // EH8 9AB has no shared tools in the fixture; EH14 4AS is seeded with one.
+  assert.equal(app.run('state.impact.active_tools_count'), 0, 'the home street starts with no shared tools');
+  assert.match(app.html(), /0 tools shared · 0 returned loans · 0 completed actions in EH8/);
+
+  app.element('#postcode').value = 'EH14 4AS';
+  app.submit('#postcode-form', {});
+  await app.flush();
+
+  assert.equal(app.run('state.impact.active_tools_count'), 1, 'impact is re-read for the moved-to community');
+  assert.equal(app.run('state.impact.returned_loans_count'), 0);
+  assert.equal(app.run('state.impact.completed_tasks_count'), 0);
+  assert.match(app.html(), /1 tools shared · 0 returned loans · 0 completed actions in EH14/,
+    'the banner shows the moved-to community counters');
+  assert.doesNotMatch(app.html(), /0 tools shared · 0 returned loans · 0 completed actions in EH8/,
+    'the old home counters are gone');
+});
+
+test('a failed move leaves the previous community intact and shows the error', async () => {
+  const app = createApp();
+  await app.flush();
+  await signIn(app, 'alice');
+  inject(app, providers(GREEN, AIR, CARBON));
+  assert.equal(app.run('state.me.community.postcode'), 'EH8 9AB');
+
+  app.element('#postcode').value = 'not a postcode';
+  app.submit('#postcode-form', {});
+  await app.flush();
+  assert.equal(app.run('state.me.community.postcode'), 'EH8 9AB', 'the failed move changes nothing');
+  assert.equal(app.run('state.previousHomePostcode'), null, 'no move means nothing to return to');
+  assert.equal(app.element('#postcode-message').textContent, 'That postcode could not be resolved.');
+  assert.equal(app.element('#toast').textContent, 'That postcode could not be resolved.');
+  assert.doesNotMatch(app.html(), /id="back-home"/, 'no back control after a failed move');
+  const rejected = app.server.writes.filter(w => w.path.endsWith('/api/v1/me/community'));
+  assert.ok(rejected.some(w => w.status === 422), 'the rejected postcode did reach the move endpoint');
+  assert.ok(!rejected.some(w => w.status === 200), 'a rejected move records no successful write');
+
+  // Having moved, a failure must keep the current street and its way back.
+  app.element('#postcode').value = 'EH14 4AS';
+  app.submit('#postcode-form', {});
+  await app.flush();
+  assert.equal(app.run('state.me.community.postcode'), 'EH14 4AS');
+  app.element('#postcode').value = 'nope';
+  app.submit('#postcode-form', {});
+  await app.flush();
+  assert.equal(app.run('state.me.community.postcode'), 'EH14 4AS', 'a failed move keeps the moved-to street');
+  assert.equal(app.run('state.previousHomePostcode'), 'EH8 9AB', 'the way back survives a failed move');
+  const moves = app.server.writes.filter(w => w.path.endsWith('/api/v1/me/community'));
+  assert.equal(moves.filter(w => w.status === 200).length, 1, 'only the real move succeeded');
+  assert.ok(moves.filter(w => w.status === 422).length >= 2, 'both rejected postcodes reached the endpoint');
 });
 
 /* -------------------------------------- boundary cases (reviewer findings) */
@@ -627,26 +793,34 @@ test('a task HTTP 422 shows the original server message and resets the place for
   }
 });
 
-test('the task selector reads the browsed environment but enforces the home action area and clears stale choices', async () => {
+test('the task selector follows the moved community\'s environment and action area, clearing stale choices', async () => {
   const { app, placesSent } = createPlaceApp();
   await app.flush();
   await signIn(app, 'alice');
   injectTaskPlaces(app, GREEN);
   selectPlace(app, 'osm-2');
-  const browsed = [{ id: 'colinton-green', name: 'Colinton Green', type: 'Park', distance_km: 0.1,
-    latitude: 55.9045, longitude: -3.249 }];
-  app.run(`state.browse = ${JSON.stringify(app.server.otherCommunity)};
-    state.browseEnvironment = ${JSON.stringify(providers(browsed, AIR, CARBON))}; render();`);
+  assert.equal(app.run('ui.selectedPlaceId'), 'osm-2', 'a choice is recorded against the old community');
+
+  app.element('#postcode').value = 'EH14 4AS';
+  app.submit('#postcode-form', {});
+  await app.flush();
+  assert.equal(app.run('state.me.community.postcode'), 'EH14 4AS', 'the account moved');
+
+  // The moved-to community's environment offers a place outside its own 2 km
+  // action area, so the default meeting point is used instead.
+  const movedPlaces = [{ id: 'far-park', name: 'Currie Park', type: 'Park', distance_km: 0.1,
+    latitude: 55.9441, longitude: -3.1887 }];
+  app.run(`state.environment = ${JSON.stringify(providers(movedPlaces, AIR, CARBON))}; location.hash='#task'; render();`);
   const panel = placePanelHTML(app);
-  assert.match(panel, /Colinton Green/);
-  assert.doesNotMatch(panel, /George Square Gardens|The Meadows/);
+  assert.match(panel, /Community centre · EH14/);
+  assert.match(panel, /Currie Park/);
   assert.match(panel, /outside the 2 km action area/);
-  assert.match(panel, /Community centre · EH8/);
   assert.match(panel, /data-task-place="" value="" checked/);
+  assert.equal(app.run('ui.selectedPlaceId'), null, 'the stale old-community choice is cleared');
   app.click({ dataset: { template: 'park_cleanup' } });
   await app.flush();
   assert.equal(placesSent[0].source, 'fixture');
-  assert.equal(placesSent[0].latitude, app.server.community.latitude);
+  assert.equal(placesSent[0].latitude, app.server.otherCommunity.latitude);
 });
 
 test('a selected green space removed from the latest data falls back before the task write', async () => {

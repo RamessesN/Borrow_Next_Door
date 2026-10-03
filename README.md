@@ -37,19 +37,25 @@ Windows 用户可在 WSL / Git-Bash 中运行，或参考下方手动启动命�
 - **社区行动（Make a difference，`#task`）**：选择 `Park cleanup` 或 `Flowerbed care` 模板，为每类需求借工具或勾选自带，查看进度；实际开展行动后填写成果说明、垃圾袋数与志愿分钟数。
 - **借入借出（My borrowing，`#loans`）**：`I’m borrowing` 查看自己借入的工具，`I’m lending` 查看借出的工具；出借方依次确认接受、交接和归还。发送申请、接受预约、交接与归还是不同状态。
 
-### 5. 输入邮编，切换浏览另一个街区
+### 5. 输入邮编，搬家到另一个街区
 
-在首页邮编输入框中输入 `EH14 4AS`，点击 `Check a postcode`。首页会切换为该社区的环境卡和工具列表，你应看到 Dora / Eve 的 4 件工具，而不是 EH8 的工具。
+在首页邮编输入框中输入 `EH14 4AS`，点击 `Check a postcode`。这一次是**真的搬家**：前端调用 `POST /api/v1/me/community`，把当前 demo 账号的 home 社区切到该邮编；随后环境卡、工具列表、任务与发布工具都从这一个 home 上下文刷新，你应看到 EH14 4AS 的工具（Dora / Eve 的 4 件工具），而不是 EH8 的工具。
 
-页面会提示正在浏览别的邮编。点击 **`Back to my street`**，即可返回自己的 `EH8 9AB`。也可以重新输入 home 邮编返回。
+首页邮编框下方会出现提示条：`You moved to EH14 4AS (EH14). Your previous street is EH8 9AB.`，并带一个 **`Back to my previous street`** 按钮（点击后提示 `Back to your street: EH8 9AB.`）。也可以在输入框里重新输入 `EH8 9AB` 回去。
 
-**浏览不等于搬家**：登录身份、借还记录、任务和发布工具仍属于 home 社区；发布对话框会明确说明工具在哪个 home 社区出借。跨街区看得到工具，不保证能借，后端仍按距离与权限校验。
+**搬家会持久化**：写入的是服务端账号的 home 社区（以 `GET /api/v1/me` 为准），刷新页面后仍在新街区；而“回到上一条街”这个入口也**能跨刷新保留**——前端只把上一个邮编当作 UI 提示存在 `localStorage`（键 `bnd.previousHomePostcode`），账号的权威社区始终来自服务端 /me。想恢复种子的 `EH8 9AB`，运行 `./start.sh --reset`。
 
-若旧数据库没有新街区工具，先用 `./start.sh --reset` 重建（会清空已有业务记录）。
+**输入自己当前的邮编是空操作**：不会改变账号，也不会向 `POST /api/v1/me/community` 发起写入，只会提示 `EH8 9AB is already your home street.`。
+
+跨街区可见不等于可借，后端仍按距离与权限校验（借用范围是当前 home 街区 2 km 内）。
+
+若旧数据库没有目标街区，先用 `./start.sh --reset` 重建（会清空已有业务记录）。
 
 ### 6. 双窗口 Alice / Bob 演示故事（7 步）
 
 请用**两个独立浏览器会话**：例如普通窗口登录 Alice，无痕窗口登录 Bob，或两个浏览器/浏览器配置。不要只开同一浏览器的两个普通窗口，因为它们共享登录存储。双方操作后，另一窗口可刷新页面查看新状态（当前不是实时推送）。
+
+> ⚠️ **两个窗口必须在同一条街**：输入邮编会真的搬家，所以如果 Alice 之前查看过 `EH14 4AS`（或 Bob 搬走了），两人就不再在同一个社区。开始本故事前请先让两人都回到 `EH8 9AB`，尤其是 **Alice 必须先回到 `EH8 9AB`**：点击 `Back to my previous street`，或在输入框重新输入 `EH8 9AB`，要么直接 `./start.sh --reset`。否则 Bob 的工具会落在 2 km 之外，第 4 步借用时按钮显示 `Too far to borrow`，强行调用则失败：`That tool is in another neighbourhood. Borrowing works within 2 km of your street.`（错误码 `OUT_OF_RANGE`）。
 
 1. **分别登录**：窗口 A 选择 Alice，窗口 B 选择 Bob；两人都先回到自己的 `EH8 9AB` 首页。
 2. **Bob 发布工具**：在 B 的社区首页点击 `Lend a tool`，填写名称（如 “Bob’s demo litter picker”）、选择 `Litter picker` 类别并填写描述，再点击 `Make it available`。

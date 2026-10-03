@@ -17,7 +17,9 @@ Flow for GET /communities/resolve:
    Upstream 404 -> 422 INVALID_POSTCODE.
 
 Resolving a postcode never touches `users`: the caller's identity and home
-community stay unchanged (spec 4.3).
+community stay unchanged (spec 4.3). The one deliberate exception is the
+demo "move my street" action (move_user_community, POST /api/v1/me/community):
+it is the only writer of users.community_id.
 """
 
 from __future__ import annotations
@@ -30,8 +32,11 @@ import uuid
 from app.adapters import c_demo_cache
 from app.adapters import postcode as postcode_adapter
 from app.adapters.postcode import PostcodeNotFoundError
+from app.auth import CurrentUser
 from app.db import connection, epoch_to_iso, utc_now, write_transaction
 from app.errors import AppError
+from app.idempotency import check_idempotent, record_idempotent
+from app.services.tools import require_active_user
 
 POSTCODE_PROVIDER = "postcodes_io"
 POSTCODE_SOURCE_URL = "https://postcodes.io/"
@@ -294,3 +299,48 @@ def resolve_postcode(raw_postcode: str) -> dict:
 
     # 4. No confirmation available at all.
     raise AppError("UPSTREAM_UNAVAILABLE")
+
+
+# --- Demo "move my street" action -------------------------------------------
+#
+# POST /api/v1/me/community is the demo's one explicit "move my community"
+# action and the ONLY writer of users.community_id: every other route takes the
+# caller's home community from the session (spec 4.2). It reuses
+# resolve_postcode for the normalise/validate/upsert and only then points the
+# caller's row at the resolved community, so an invalid postcode leaves the
+# user untouched. Resolving on its own (GET /communities/resolve) still never
+# touches users.
+
+
+def move_user_community(
+    *,
+    user: CurrentUser,
+    postcode: str,
+    key: str,
+    fingerprint: str,
+) -> tuple[dict, bool]:
+    """Point the caller's users.community_id at the resolved postcode.
+
+    Returns (CommunityResponse-shaped dict, replayed). An invalid or
+    unresolved postcode raises before the UPDATE, leaving the caller's home
+    community and every surface that follows it unchanged.
+    """
+    community = resolve_postcode(postcode)
+
+    with connection() as conn:
+        with write_transaction(conn):
+            require_active_user(conn, user.id)
+            replay = check_idempotent(conn, user.id, key, fingerprint)
+            if replay["is_replay"]:
+                return json.loads(replay["response_json"]), True
+
+            now = utc_now()
+            conn.execute(
+                "UPDATE users SET community_id = ? WHERE id = ?",
+                (community["id"], user.id),
+            )
+            record_idempotent(
+                conn, user.id, key, fingerprint, 200,
+                json.dumps(community, ensure_ascii=False), now,
+            )
+    return community, False

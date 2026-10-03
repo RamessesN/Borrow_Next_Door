@@ -781,6 +781,53 @@ curl -s "$BASE/api/v1/communities/c1111111-1111-4111-8111-111111111111/environme
 
 关键错误（404 `NOT_FOUND`，社区不存在；邮编初始化上游故障且无缓存为 503 `UPSTREAM_UNAVAILABLE`）。
 
+### 15. 切换 home 社区（demo 搬家）
+
+```bash
+curl -s -X POST "$BASE/api/v1/me/community" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: a0000000-0000-4000-8000-000000000012" \
+  -d '{"postcode": "EH14 4AS"}'
+```
+
+成功（200，返回与 `GET /me` 相同的 `MeResponse`；服务端解析/校验邮编后只把调用者的 `users.community_id` 指向该社区，后续 `GET /me`、工具列表、任务与借还都跟随新的 home 社区）：
+
+```json
+{
+  "data": {
+    "id": "u1111111-1111-4111-8111-111111111111",
+    "display_name": "Alice",
+    "community": {
+      "id": "c2222222-2222-4222-8222-222222222222",
+      "postcode": "EH14 4AS",
+      "outcode": "EH14",
+      "latitude": 55.9041,
+      "longitude": -3.2489,
+      "country": "Scotland",
+      "source": "fixture",
+      "source_kind": "fixture",
+      "fetched_at": "2026-10-03T09:00:00Z"
+    },
+    "mode": "demo"
+  },
+  "meta": {"request_id": "f47ac10b-58cc-4372-a567-0e02b2c3d479"}
+}
+```
+
+说明：请求体为 `{"postcode": "<UK postcode>"}`（大小写与空格会被归一化）。`POST /api/v1/me/community` 是 demo 里**唯一**会改写 `users.community_id` 的写操作；`GET /communities/resolve` 只解析邮编，从不改账号。邮编无法解析时为 422 `INVALID_POSTCODE`，此时账号不变。
+
+关键错误：
+
+- 400 `IDEMPOTENCY_KEY_REQUIRED`：缺少 `Idempotency-Key`（业务写均要求）。
+- 400 `IDEMPOTENCY_KEY_INVALID`：key 不是 UUID。
+- 401 `UNAUTHENTICATED`：token 缺失/无效/过期/已注销。
+- 409 `IDEMPOTENCY_KEY_REUSED`：同一个 key 用于不同邮编的不同意图。
+- 422 `INVALID_POSTCODE`：邮编无法解析，账号保持不变。
+- 503 `UPSTREAM_UNAVAILABLE`：邮编无缓存且上游故障，账号保持不变。
+
+重放：同一 actor 用同一 `Idempotency-Key` 重复相同请求，服务端直接返回首次记录的结果（响应头 `Idempotency-Replayed: true`），不会再次搬家。
+
 ---
 
 ## 其余端点（规格 8.2 剩余）
