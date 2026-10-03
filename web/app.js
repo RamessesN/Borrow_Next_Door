@@ -52,7 +52,7 @@ function freshState() {
   };
 }
 let state = freshState();
-let ui = { filter: 'all', search: '', loanTab: 'borrowed', busy: false, loading: false, message: '' };
+let ui = { filter: 'all', search: '', loanTab: 'borrowed', selectedTaskId: null, busy: false, loading: false, message: '' };
 let toastTimer;
 function toast(message) { $('#toast').textContent = message; $('#toast').classList.add('visible'); clearTimeout(toastTimer); toastTimer = setTimeout(() => $('#toast').classList.remove('visible'), 5200); }
 
@@ -144,7 +144,7 @@ const postcode = () => { const c = currentCommunity(); return c ? c.postcode : '
 const visibleTools = () => (state.browse ? (state.browseTools || []) : state.tools);
 const visibleEnvironment = () => (state.browse ? state.browseEnvironment : state.environment);
 const myTasks = () => state.tasks.filter(t => state.me && t.creator && t.creator.id === state.me.id);
-const myOpenTask = () => myTasks().filter(t => t.status === 'open')
+const myOpenTask = () => myTasks().find(t => t.status === 'open' && t.id === ui.selectedTaskId) || myTasks().filter(t => t.status === 'open')
   .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))[0] || null;
 function taskContext(task) {
   return {
@@ -191,6 +191,7 @@ function setLoginMessage(message) {
   else renderLogin(message);
 }
 function clearSession() {
+  ui.selectedTaskId = null;
   dropStore(TOKEN_KEY); dropStore(USER_KEY);
   token = null; client.setToken(null);
 }
@@ -627,20 +628,23 @@ async function backToHome(btn) {
   });
 }
 async function chooseTemplate(templateId, btn) {
-  const open = myOpenTask();
-  if (open) {
-    if (open.template_id === templateId) { render(); return; }
-    toast(`You already have an action in progress (“${open.title}”). Record it before starting a different one.`);
+  if (ui.busy) return;
+  const existing = myTasks().filter(t => t.status === 'open' && t.template_id === templateId)
+    .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))[0];
+  if (existing) {
+    ui.selectedTaskId = existing.id;
+    render();
     return;
   }
   await action(btn, async () => {
     const tpl = state.templates.find(t => t.id === templateId);
     const c = state.me.community;
-    await client.createTask({
+    const created = await client.createTask({
       template_id: templateId,
       title: tpl ? tpl.title : templateId,
       place: { name: `Neighbourhood green space · ${c.outcode}`, latitude: c.latitude, longitude: c.longitude, source: 'manual', source_id: null }
     });
+    ui.selectedTaskId = created.id;
     await refresh();
     render();
     toast('Action started. Now bring the tools together.');

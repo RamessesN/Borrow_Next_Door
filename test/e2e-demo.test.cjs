@@ -183,6 +183,40 @@ test('bob lends, alice borrows: the full story through the real API client', asy
     .forEach(w => assert.equal(w.key, null, 'auth routes must not send an Idempotency-Key'));
 });
 
+test('action templates switch both ways and preserve existing progress without duplicate tasks', async () => {
+  const app = createApp();
+  await app.flush();
+  await signIn(app, 'alice');
+  app.run("location.hash='#task';render()");
+  app.click({ dataset: { template: 'flowerbed_care' } });
+  await app.flush();
+  const flowerId = app.run('myOpenTask().id');
+  const requirementId = app.run('myOpenTask().requirements[0].id');
+  await app.run(`client.setSelfSupply('${flowerId}', '${requirementId}', true)`);
+  await app.run('refresh()');
+
+  app.click({ dataset: { template: 'park_cleanup' } });
+  await app.flush();
+  assert.equal(app.run('myOpenTask().template_id'), 'park_cleanup');
+  assert.equal(app.run('myOpenTask().requirements.map(r => r.category).join(",")'), 'litter_picker,reusable_gloves');
+  assert.match(app.html(), /template-option active" data-template="park_cleanup"/);
+
+  app.click({ dataset: { template: 'flowerbed_care' } });
+  await app.flush();
+  assert.equal(app.run('myOpenTask().id'), flowerId);
+  assert.equal(app.run('myOpenTask().requirements[0].self_supplied'), true);
+  assert.match(app.html(), /template-option active" data-template="flowerbed_care"/);
+  await app.run('refresh();');
+  assert.equal(app.run('myOpenTask().id'), flowerId, 'refresh preserves the selected activity');
+
+  app.click({ dataset: { template: 'park_cleanup' } });
+  await app.flush();
+  app.click({ dataset: { template: 'park_cleanup' } });
+  await app.flush();
+  assert.equal(app.run('myOpenTask().template_id'), 'park_cleanup');
+  assert.equal(app.server.db.tasks.length, 2, 'repeated switching reuses open tasks');
+});
+
 test('server errors keep the form open and show the backend message', async () => {
   const app = createApp();
   await app.flush();
