@@ -34,8 +34,8 @@ test('every name the docs quote appears in the docs it belongs to', () => {
   const a = readDoc('A-ui-boundary.md');
   ['D.describeTask', 'D.taskProgress', 'D.wantedBoard', 'D.impactReport',
     'requirementId', 'statusText', 'nextAction', 'data-req', 'data-self',
-    'data-template', '#complete-task', '#outcome-note', '#impact-bags',
-    '#impact-minutes', '#place-name']
+    'data-template', '#complete-task', '#outcome-note', 'data-lend',
+    '#lent-marks', '#story-row']
     .forEach(token => assert.ok(a.includes(token), `A-ui-boundary.md should mention ${token}`));
   assert.ok(!a.includes('#impact-bought-new'), 'A-ui-boundary.md must not resurrect the dropped bought-new field');
 

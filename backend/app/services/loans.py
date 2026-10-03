@@ -230,7 +230,12 @@ def create_loan(
     """POST /api/v1/loans: independent connection -> BEGIN IMMEDIATE ->
     re-confirm user -> idempotency -> tool/requirement checks -> insert
     pending loan -> created event -> touch tool.updated_at -> record key ->
-    COMMIT. Any exception rolls back and maps to a spec error."""
+    COMMIT. Any exception rolls back and maps to a spec error.
+
+    The same endpoint covers two intents: a neighbour borrowing a tool, and
+    an organiser lending their own tool to a requirement of their own open
+    action (`requirement_id` present, tool owner == borrower). Both start as
+    `pending`; the state machine and the events afterwards are identical."""
     tool_id: str = body["tool_id"]
     requirement_id: str | None = body.get("requirement_id")
     note: str = body.get("note") or ""
@@ -258,7 +263,13 @@ def create_loan(
                 raise AppError("NOT_FOUND")
             if tool["is_archived"]:
                 raise AppError("TOOL_ARCHIVED")
-            if tool["owner_id"] == user.id:
+            # Spec 4.2: the owner never borrows their own tool (SELF_BORROW_
+            # FORBIDDEN). The one self-loan we allow is the organiser lending
+            # their own tool to a requirement of their own open action — the
+            # requirement block below (creator, open task, category, not yet
+            # claimed) keeps that door narrow, so a bare self-borrow still
+            # fails here.
+            if tool["owner_id"] == user.id and not requirement_id:
                 raise AppError("SELF_BORROW_FORBIDDEN")
 
             # Spec 4.3: server-computed distance from the borrower's own home

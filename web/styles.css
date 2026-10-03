@@ -105,3 +105,18 @@
 .story-latest .eyebrow,.story-form .eyebrow{margin-bottom:8px;color:var(--muted)}
 .story-form{border-top:1px solid var(--line);margin-top:16px;padding-top:16px}
 .story-quote{background:#f7f8f1;border-left:3px solid #9db88a;border-radius:8px;padding:12px 14px;font-size:12.5px;line-height:1.7}
+
+/* ---- Member A: the optional self-lend (“lend my own tool” for my own action) ---- */
+.lend-choice{display:flex;align-items:flex-start;gap:8px;border:1px dashed #cdd6c1;border-radius:8px;background:#f6f8f0;padding:9px 11px;font-size:11px;line-height:1.5;cursor:pointer;max-width:265px;text-align:left}
+.lend-choice input{margin-top:2px;flex:none}
+.lend-choice span{min-width:0}
+.lend-choice b{display:block;font-size:11px;font-weight:600}
+.lend-choice small{display:block;font-size:10px;color:var(--muted);margin-top:2px}
+.lend-choice.on{border-style:solid;border-color:#799955;background:#eef3e4}
+.pill.lent{background:#e3edd3;color:#4d6b3c}
+.lent-marks{display:flex;flex-direction:column;gap:9px;margin:0 0 14px}
+.lent-mark{display:flex;align-items:center;gap:10px;border:1px solid #d7e0c2;border-radius:9px;background:#f6f9ee;padding:10px 12px}
+.lent-tag{background:var(--green);color:var(--lime);border-radius:20px;font-size:9px;font-weight:700;letter-spacing:1px;text-transform:uppercase;padding:5px 9px;white-space:nowrap}
+.lent-mark b{display:block;font-size:12px}
+.lent-mark small{display:block;font-size:10px;color:var(--muted);margin-top:2px}
+.loan-card.self-lend{border-left:3px solid #799955}

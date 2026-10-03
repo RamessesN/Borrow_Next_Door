@@ -674,15 +674,46 @@ def test_self_supply_rejects_non_boolean(client, alice_token):
 # --- Completion ----------------------------------------------------------------
 
 
-def test_complete_requires_eligibility(client, alice_token):
+def test_complete_ignores_the_tool_checklist(client, alice_token):
+    """Getting the tools together (02) is optional: the organiser may record
+    the outcome of an open action even when requirements are still missing or
+    unconfirmed. The derived flags stay informative only."""
     data = task_data(create_task(client, alice_token))  # missing + match_available
+    assert data["completion_eligible"] is False
+    assert data["coordination_ready"] is False
+
     resp = complete(
         client, alice_token, data["id"], {"outcome_note": "Finished the cleanup."}
     )
-    assert resp.status_code == 409
-    assert resp.json()["error"]["code"] == "TASK_NOT_READY"
-    # Nothing changed.
-    assert get_task(client, alice_token, data["id"]).json()["data"]["status"] == "open"
+    assert resp.status_code == 200, resp.text
+    done = resp.json()["data"]
+    assert done["status"] == "completed"
+    assert done["outcome"]["note"] == "Finished the cleanup."
+    assert done["outcome"]["bags_collected"] is None
+    assert done["outcome"]["volunteer_minutes"] is None
+    # The checklist is untouched: it keeps reporting its own progress.
+    assert done["completion_eligible"] is False
+    assert done["coordination_ready"] is False
+    assert {r["state"] for r in done["requirements"]} <= {"missing", "match_available"}
+
+
+def test_complete_with_an_active_loan_still_works(client, alice_token, settings):
+    """A pending request does not block the report either — borrowing and
+    completing stay separate facts (the loan keeps its own state machine)."""
+    data = task_data(create_task(client, alice_token))
+    gloves = req_by_category(data, "reusable_gloves")
+    insert_loan(
+        settings, GLOVES_TOOL, user_id(settings, "alice"), gloves["id"], "pending"
+    )
+
+    resp = complete(
+        client, alice_token, data["id"], {"outcome_note": "Recorded with a request still open."}
+    )
+    assert resp.status_code == 200, resp.text
+    done = resp.json()["data"]
+    assert done["status"] == "completed"
+    assert req_by_category(done, "reusable_gloves")["state"] == "pending"
+    assert done["completion_eligible"] is False
 
 
 def test_complete_success_replay_noop_and_conflict(client, alice_token):

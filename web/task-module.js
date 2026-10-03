@@ -64,6 +64,8 @@
  *   completion_eligible = every requirement in {self_supplied, in_use,
  *                         fulfilled}   (an accepted reservation still has to
  *                         be handed over, and a bare "missing" never counts).
+ *   Both are progress flags only: the tool checklist (02) never blocks the
+ *   outcome report (03) — see outcomeReadiness().
  * ========================================================================== */
 (function (global, factory) {
   var api = factory();
@@ -882,6 +884,11 @@
       ownerId: loan.owner_id !== undefined && loan.owner_id !== null ? loan.owner_id : (tool ? toolOwnerId(tool) : null),
       ownerName: displayOwner(loan, tool, ctx),
       borrowerId: loan.borrower_id !== undefined ? loan.borrower_id : null,
+      // Owner and borrower are the same person only for the one self-loan B
+      // allows: an organiser lending their own tool to their own action.
+      selfLend: loan.owner_id !== undefined && loan.owner_id !== null &&
+        loan.borrower_id !== undefined && loan.borrower_id !== null &&
+        String(loan.owner_id) === String(loan.borrower_id),
       status: loan.status,
       stage: stage.stage,
       stageOrder: stage.order,
@@ -931,12 +938,21 @@
     var tools = [];
     if (derived.state === 'match_available') tools = matchTools(category, ctx);
 
+    // A self-loan is the organiser's own registered tool lent to this very
+    // requirement (owner == borrower). It is a real loan for B, but it reads
+    // differently in the UI: nobody is waiting for a neighbour.
+    var activeLoan = derived.activeLoan || null;
+    var selfLend = !!(activeLoan && activeLoan.owner_id !== undefined && activeLoan.owner_id !== null &&
+      activeLoan.borrower_id !== undefined && activeLoan.borrower_id !== null &&
+      String(activeLoan.owner_id) === String(activeLoan.borrower_id));
+
     var descriptor = {
       requirement: req,
       requirementId: req.id !== undefined ? req.id : null,
       category: category,
       label: categoryLabel(category),
       selfSupplied: derived.state === 'self_supplied' || !!req.self_supplied,
+      selfLend: selfLend,
       state: derived.state,
       confirmed: inList(COORDINATION_STATES, derived.state),
       pending: derived.state === 'pending',
@@ -963,18 +979,26 @@
         descriptor.statusText = 'Confirmed · you are bringing your own';
         break;
       case 'pending':
-        descriptor.statusText = 'Awaiting ' + ownerText + ' to respond';
+        descriptor.statusText = selfLend
+          ? 'Awaiting your confirmation'
+          : 'Awaiting ' + ownerText + ' to respond';
         break;
       case 'confirmed':
-        descriptor.statusText = 'Confirmed · reservation accepted by ' + ownerText;
+        descriptor.statusText = selfLend
+          ? 'Confirmed · your own tool is reserved for this action'
+          : 'Confirmed · reservation accepted by ' + ownerText;
         break;
       case 'in_use':
-        descriptor.statusText = 'In use · handed over by ' + ownerText;
+        descriptor.statusText = selfLend
+          ? 'In use · your own tool is out with this action'
+          : 'In use · handed over by ' + ownerText;
         break;
       case 'fulfilled':
-        descriptor.statusText = ownerText
-          ? 'Fulfilled · borrowed from ' + ownerText + ' and returned'
-          : 'Fulfilled · borrowed and returned';
+        descriptor.statusText = selfLend
+          ? 'Fulfilled · your own tool was used and is back'
+          : ownerText
+            ? 'Fulfilled · borrowed from ' + ownerText + ' and returned'
+            : 'Fulfilled · borrowed and returned';
         break;
       case 'match_available':
         descriptor.statusText = tools.length
@@ -1300,21 +1324,23 @@
   }
 
   /**
-   * Whether the organiser may record the outcome yet, mirroring the
-   * backend's completion gate (TASK_NOT_READY): every requirement must be
-   * self_supplied, in_use or fulfilled — an accepted reservation still needs
-   * the handover. Outstanding returns are only warned about, never blocking,
-   * because borrowing and completing stay separate facts.
+   * Whether the organiser may record the outcome of their own action.
+   * Getting the tools together (02) is optional and never gates the report
+   * (03): B records an open action whatever the checklist says, and the
+   * checklist keeps its own progress. Unconfirmed requirements and
+   * outstanding returns are only reminded about, because borrowing and
+   * completing stay separate facts.
    */
   function outcomeReadiness(task, ctx) {
     var progress = taskProgress(task, ctx);
     var outstandingReturns = ((ctx && ctx.loans) || []).filter(function (l) {
       return l && l.task_id === task.id && (l.status === 'accepted' || l.status === 'on_loan');
     }).length;
-    var canSubmit = task.status !== 'completed' && progress.completionEligible;
+    var canSubmit = task.status !== 'completed';
     var parts = [];
     if (task.status !== 'completed' && !progress.completionEligible) {
-      parts.push('This action can be recorded once every requirement is self-supplied, in use or fulfilled.');
+      parts.push('Not every tool is confirmed yet. That is fine — the checklist is optional, ' +
+        'so record the action anyway when you are done.');
     }
     if (outstandingReturns > 0) {
       parts.push(outstandingReturns + (outstandingReturns === 1 ? ' tool is' : ' tools are') +
@@ -1358,7 +1384,29 @@
    * FORBIDDEN); this mirrors the same guards client-side so the button can be
    * disabled honestly before the round trip. Pass `context` ({tools, loans})
    * so the requirement guard can tell a live claim from a finished one.
+   *
+   * Borrowing your own tool is still SELF_BORROW_FORBIDDEN everywhere except
+   * the one case B allows: lending it to a requirement of your own open
+   * action (see isOwnRequirement below), which is what the checklist's
+   * optional “lend my tool” choice writes.
    */
+
+  /**
+   * Is `requirement` one of `task`'s own requirements, and is `borrowerId`
+   * the organiser who created that task? B's self-lend path accepts exactly
+   * that combination: your own tool, lent to your own action's requirement.
+   */
+  function isOwnRequirement(task, requirement, borrowerId) {
+    if (!task || !requirement || borrowerId === null || borrowerId === undefined) return false;
+    var creatorId = task.creator && task.creator.id !== undefined && task.creator.id !== null
+      ? task.creator.id : null;
+    if (creatorId === null || String(creatorId) !== String(borrowerId)) return false;
+    if (!Array.isArray(task.requirements)) return false;
+    return task.requirements.some(function (r) {
+      return r && r.id !== undefined && r.id !== null && String(r.id) === String(requirement.id);
+    });
+  }
+
   function createLoanRequest(tool, task, requirement, borrowerId, makeId, context) {
     if (!tool || toolAvailability(tool) !== 'available' || tool.is_archived) {
       return { ok: false, reason: 'tool_unavailable' };
@@ -1370,7 +1418,9 @@
     var ownerId = toolOwnerId(tool);
     if (ownerId !== null && ownerId !== undefined && borrowerId !== null && borrowerId !== undefined &&
         String(ownerId) === String(borrowerId)) {
-      return { ok: false, reason: 'self_borrow_forbidden' };
+      if (!isOwnRequirement(task, requirement, borrowerId)) {
+        return { ok: false, reason: 'self_borrow_forbidden' };
+      }
     }
     var idfn = makeId || defaultId;
     var now = new Date().toISOString();

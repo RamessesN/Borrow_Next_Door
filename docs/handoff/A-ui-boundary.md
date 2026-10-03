@@ -22,8 +22,8 @@ B 后端已交付，前端接入 `/api/v1` 时新增三条硬要求：
 | `taskPage()` | 整段换成 D 的组件 | 见 §5 |
 | `borrow()` | 多一个 `requirementId` 参数 | 不带该参数时走原来的按类别兜底，社区页的调用不用改 |
 | click 处理器 | `data-borrow` 现在会带 `data-req`；`data-template` 走 `D.setTemplate()`；`complete-task` 改收自报字段 | — |
-| change 处理器 | `data-self` 的值从**类别**变成**需求 id**（B 的 requirement id） | 如果你别处也用了 `data-self`，要对齐 |
-| input 处理器 | 新增 `#impact-bags` / `#impact-minutes` 的持久化 | — |
+| change 处理器 | `data-self` 的值从**类别**变成**需求 id**（B 的 requirement id）；新增 `data-lend` 与自借款标记（见 §5） | 如果你别处也用了 `data-self`，要对齐 |
+| input 处理器 | ~~`#impact-bags` / `#impact-minutes` 的持久化~~ **已删除**：03 只收成果叙述，袋数与时长不再由界面收集 | 旧控件已移除，`outcome.bags_collected` / `volunteer_minutes` 保持 `null` |
 | `storage` 事件 + 初始化 | 加载时对全部任务跑一次迁移，有变动才写回 | — |
 
 ## 2. 文件归属
@@ -57,7 +57,7 @@ B 后端已交付，前端接入 `/api/v1` 时新增三条硬要求：
 
 工具 `returned` 之后，`availability` 回到 `available`；任务状态**仍然是 `open`**（旧模型叫 `planning`）。任务成果只能由发起者单独提交。
 
-`D.outcomeReadiness()` 只**警告**还有未归还的工具，不阻止提交。不要「顺手」在归还时把任务标成完成。
+**02 是可选的，不卡 03**：工具清单（`coordination_ready` / `completion_eligible`）只是进度展示，`D.outcomeReadiness().canSubmit` 现在只看任务是否还 `open`（已完成的任务不能再提交）；未落实的需求与未归还的工具只作为提示文字（`warning`）显示，`#complete-task` 不会因此置灰。不要「顺手」在归还时把任务标成完成。
 
 ### 3.3 未采集的数据不能显示为 0
 
@@ -117,18 +117,27 @@ D.impactReport(tasks, loans, { postcode, tools, names })   // { metrics[], discl
 | `data-borrow` + `data-req` | 工具 id + **需求 id** | 申请某一件工具填某个需求 |
 | `data-self` | **需求 id**（不是类别） | 勾选「I'll bring my own」→ `PUT /api/v1/tasks/{id}/requirements/{rid}/self-supply` |
 | `data-template` | 模板 id（B 冻结：`park_cleanup` / `flowerbed_care`） | 选择 / 切换行动 |
-| `#complete-task` | — | 提交成果 → `POST /api/v1/tasks/{id}/complete` |
+| `#complete-task` | — | 提交成果 → `POST /api/v1/tasks/{id}/complete`（02 未落实也照常提交） |
 | `#outcome-note` | — | 成果叙述 → `outcome.note` |
-| `#impact-bags` | — | 自报袋数 → `outcome.bags_collected` |
-| `#impact-minutes` | — | 自报时长 → `outcome.volunteer_minutes`（旧字段名 `participant_minutes` 已在 B 契约中改名） |
-| `#place-name` | — | 任务地点 → `place.name` |
+| `data-lend` + `data-req` | **工具 id + 需求 id** | 可选的自借：把我自己登记的工具借给我自己创建的活动（02 处的浇水壶 / 手套这类需求行）→ `POST /api/v1/loans`（`owner_id == borrower_id`，B 允许的唯一自借途径）；取消勾选 → `POST /api/v1/loans/{id}/cancel` 释放工具 |
+| `#lent-marks` | — | 03 面板的 `borrowed` 标记：自借记录存在时才出现，不是装饰 |
+| `#story-row` | — | 首页 `Stories from the street` 的卡片行（`#story-row` / `.story-card` / `.stories-empty`），数据来自 `state.tasks` 里已完成的 `outcome.note` |
 | ~~bought-new 问卷字段~~ | — | **已废弃**：B 契约的 `outcome` 不再有 `would_have_bought_new` 字段，测试不再要求对应钩子；保留旧控件只会写入后端不存在的字段 |
 
 改钩子也可以，同步改 e2e 测试就行 —— 那个测试本来就是设计成「通过真实事件驱动你的 UI」的，所以它也是你重构时的安全网。改动前跑一次 `npm test`，改完再跑一次。
 
+### 5.1 任务页的固定骨架与首页的 Stories 条
+
+B 在 2026-10-03 把任务页改成**对每个人都同一套骨架**（`test/e2e-demo.test.cjs` / `community-environment.test.cjs` 都断言了）：
+
+- 01 的 `#task-place-panel` 始终存在；行动进行中时显示**锁定面板**（当前集合点 + 只读选项），不再有 `#place-name` 输入框。
+- 02 在没有行动时用 `.requirement.ghost` 预览两个模板各自需要什么，不再是一句“Pick an action above”。
+- 03 固定为 `LATEST STORY`（`.story-quote`）+ `RECORD AN ACTION`（`#outcome-note` / `#complete-task`）两个槽位，没有 open 任务时右侧显示说明文字。
+- 首页在 hero 与环境卡之间插入 `Stories from the street`（`storiesStrip()`）：从 `state.tasks` 里已完成且有 `outcome.note` 的任务取最新 3 条，每 4.5 秒轮换（`ui.storyOffset` + `setInterval`，无故事时显示 `.stories-empty`）。种子数据 `DEMO_STORIES` 在两个街区各预置了 2 条已记录行动，所以新库一启动就有东西可看。
+
 另外两个提醒：
 
-- **`#impact-*` 输入框是即时持久化的**（`input` 事件里写 state）。如果你把面板改成受控组件或延迟提交，记得同步改那两个处理器。
+- **~~`#impact-*` 输入框是即时持久化的~~**（已删除）：03 现在只有一个 `#outcome-note` 文本框，成果在 `#complete-task` 提交时才写入；`bags_collected` / `volunteer_minutes` 是 B 契约里的可选字段，界面不再提供输入，它们保持 `null`（不报 0）。
 - **不要在渲染里调 `ensureTask()`**（§3.1）。如果你需要「当前任务」用 `currentTask()`，它可能返回 `undefined`，要能处理空状态。
 
 ## 6. 提 PR 前

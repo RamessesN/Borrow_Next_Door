@@ -773,7 +773,7 @@ test('applyOutcome writes the B outcome block and ignores bought-new', () => {
     { note: 'Corrected.', bags_collected: null, volunteer_minutes: 30, verification: 'self_reported' });
 });
 
-test('outcomeReadiness mirrors the backend completion gate and only warns about returns', () => {
+test('outcomeReadiness lets the organiser record independently of the checklist', () => {
   const task = makeTask();
   const picker = task.requirements.find(r => r.category === 'litter_picker');
   const gloves = task.requirements.find(r => r.category === 'reusable_gloves');
@@ -782,9 +782,10 @@ test('outcomeReadiness mirrors the backend completion gate and only warns about 
   const context = () => ctx(task, tools, loans);
 
   let ready = D.outcomeReadiness(task, context());
-  assert.equal(ready.canSubmit, false, 'nothing is arranged yet');
+  assert.equal(ready.canSubmit, true, '02 is optional — an open action can always be recorded');
   assert.equal(ready.unconfirmedRequirements, 2);
-  assert.match(ready.warning, /can be recorded once/);
+  assert.equal(ready.completionEligible, false, '…while the checklist keeps reporting its own progress');
+  assert.match(ready.warning, /checklist is optional/);
 
   loans.push(D.createLoanRequest(tools[0], task, picker, 'alice', () => 'L1', context()).request);
   assert.equal(D.setSlotSource(task, gloves.id, 'self').ok, true);
@@ -793,8 +794,8 @@ test('outcomeReadiness mirrors the backend completion gate and only warns about 
   ready = D.outcomeReadiness(task, context());
   assert.equal(ready.coordinationReady, true, 'accepted counts for coordination');
   assert.equal(ready.completionEligible, false,
-    'but not for completion: the handover has not happened');
-  assert.equal(ready.canSubmit, false);
+    'but not for completion eligibility: the handover has not happened');
+  assert.equal(ready.canSubmit, true, 'an accepted reservation never blocks the report either');
   assert.equal(ready.unconfirmedRequirements, 0);
 
   loans[0].status = 'on_loan';
@@ -826,8 +827,13 @@ test('createLoanRequest mirrors the backend guards and stamps the requirement', 
     task, picker, 'alice', () => 'x', { loans: [], tools: [] }),
     { ok: false, reason: 'tool_unavailable' });
   assert.deepEqual(D.createLoanRequest(tool('p4', 'alice', 'litter_picker'),
-    task, picker, 'alice', () => 'x', { loans: [], tools: [] }),
-    { ok: false, reason: 'self_borrow_forbidden' }, 'SELF_BORROW_FORBIDDEN, mirrored');
+    { id: 'task9', creator: { id: 'bob' }, requirements: [{ id: 'r9', category: 'litter_picker' }] },
+    picker, 'alice', () => 'x', { loans: [], tools: [] }),
+    { ok: false, reason: 'self_borrow_forbidden' },
+    'SELF_BORROW_FORBIDDEN, mirrored: your tool for somebody else\u2019s action');
+  assert.deepEqual(D.createLoanRequest(tool('p4b', 'alice', 'litter_picker'),
+    task, null, 'alice', () => 'x', { loans: [], tools: [] }),
+    { ok: false, reason: 'self_borrow_forbidden' }, 'a bare self-borrow stays forbidden');
 
   assert.equal(D.setSlotSource(task, gloves.id, 'self').ok, true);
   assert.deepEqual(D.createLoanRequest(tool('p5', 'bob', 'reusable_gloves'),
@@ -865,6 +871,32 @@ test('createLoanRequest mirrors the backend guards and stamps the requirement', 
     task, null, 'alice', () => 'L3', context);
   assert.equal(solo.ok, true);
   assert.equal(solo.request.requirement_id, null);
+});
+
+test('the one self-lend B allows: your own tool, your own action\u2019s requirement', () => {
+  const task = makeTask();
+  const picker = task.requirements.find(r => r.category === 'litter_picker');
+
+  const selfLend = D.createLoanRequest(tool('own', 'alice', 'litter_picker'),
+    task, picker, 'alice', () => 'S1', { loans: [], tools: [] });
+  assert.equal(selfLend.ok, true, 'owner == borrower is allowed for your own requirement');
+  assert.equal(selfLend.request.owner_id, 'alice');
+  assert.equal(selfLend.request.borrower_id, 'alice', 'a self-lend names the owner twice');
+  assert.equal(selfLend.request.requirement_id, picker.id);
+  assert.equal(picker.state, 'pending', 'the self-lend claims the requirement like any other loan');
+
+  const described = D.describeRequirement(picker,
+    { task, tools: [], loans: [selfLend.request], names: OWNERS });
+  assert.equal(described.selfLend, true);
+  assert.equal(described.state, 'pending');
+  assert.match(described.statusText, /Awaiting your confirmation/);
+  assert.equal(described.loans[0].selfLend, true, 'the loan descriptor carries the same fact');
+
+  const neighbour = D.describeRequirement(picker,
+    { task, tools: [], loans: [loan('L9', { requirement_id: picker.id })], names: OWNERS });
+  assert.equal(neighbour.selfLend, false, 'a neighbour\u2019s loan is not a self-lend');
+  assert.equal(neighbour.loans[0].selfLend, false);
+  assert.match(neighbour.statusText, /Awaiting Bob to respond/);
 });
 
 /* -------------------------------------------------------- derived bookkeeping */

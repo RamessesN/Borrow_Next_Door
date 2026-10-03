@@ -638,10 +638,11 @@ def complete_task(
             return build_task_data(conn, task, user.id)
         raise AppError("TASK_ALREADY_COMPLETED")
 
-    current = build_task_data(conn, task, user.id)
-    if not current["completion_eligible"]:
-        raise AppError("TASK_NOT_READY")
-
+    # Getting the tools together is optional and never gates the report: the
+    # organiser may record the outcome of their own open action even when
+    # requirements are still missing, pending or unconfirmed. The derived
+    # `coordination_ready` / `completion_eligible` flags stay as informative
+    # progress figures only (spec 7.1 derivation, no longer a precondition).
     now = utc_now()
     cur = conn.execute(
         "UPDATE tasks SET status = 'completed', outcome_note = ?, "

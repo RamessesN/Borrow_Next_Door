@@ -658,13 +658,13 @@ curl -s -X POST "$BASE/api/v1/tasks/55555555-5555-4555-8555-555555555555/complet
 }
 ```
 
-关键错误（409 `TASK_NOT_READY`，存在 pending/accepted 需求或需求未满足；重复完成为 409 `TASK_ALREADY_COMPLETED`）：
+关键错误（**工具清单不影响完成**：任务仍 `open` 时创建者总可以提交；重复完成且内容不同为 409 `TASK_ALREADY_COMPLETED`）：
 
 ```json
 {
   "error": {
-    "code": "TASK_NOT_READY",
-    "message": "The task does not meet its completion conditions.",
+    "code": "TASK_ALREADY_COMPLETED",
+    "message": "The task is already completed.",
     "details": {}
   },
   "meta": {"request_id": "f47ac10b-58cc-4372-a567-0e02b2c3d479"}
@@ -1008,7 +1008,7 @@ curl -s "$BASE/api/v1/tasks/55555555-5555-4555-8555-555555555555" \
 | 404 | NOT_FOUND | 不存在或无权查看的私有对象 |
 | 409 | TOOL_UNAVAILABLE / TOOL_ARCHIVED / ACTIVE_LOAN_EXISTS | 工具已占用、归档或不允许归档 |
 | 409 | REQUIREMENT_OCCUPIED / REQUIREMENT_LOCKED / REQUIREMENT_ALREADY_FULFILLED | 需求被占用、自备/使用状态冲突 |
-| 409 | INVALID_TRANSITION / TASK_NOT_READY / TASK_ALREADY_COMPLETED | 状态或任务完成条件不符合 |
+| 409 | INVALID_TRANSITION / TASK_ALREADY_COMPLETED | 状态不允许该动作，或任务已记录过 |
 | 409 | IDEMPOTENCY_KEY_REUSED | 同用户 key 被用于不同意图 |
 | 422 | VALIDATION_ERROR / INVALID_POSTCODE / CATEGORY_MISMATCH / OUT_OF_RANGE | 输入、邮编、类别或范围不符合 |
 | 429 | RATE_LIMITED | 演示登录或外部查询频率限制 |

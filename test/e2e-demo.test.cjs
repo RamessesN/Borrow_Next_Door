@@ -272,3 +272,134 @@ test('search still filters, and HTML is still escaped', async () => {
   app.input({ id: 'tool-search', value: '' });
   assert.equal(app.run("esc('<script>')"), '&lt;script&gt;');
 });
+
+/* The optional self-lend of 02: the organiser already owns a registered tool
+   that the chosen action needs, so they can book it for their own action
+   instead of asking a neighbour. B records a real loan (owner == borrower),
+   the tool leaves the neighbourhood list as `reserved`, and 03 keeps a
+   “borrowed” mark for it. */
+test('alice lends her own registered tool to her own action and 03 marks it borrowed', async () => {
+  const app = createApp();
+  await app.flush();
+  await signIn(app, 'alice');
+
+  /* ---- 1. alice registers the watering can she already owns ---- */
+  app.run("location.hash='#community';render()");
+  app.click({ dataset: { publish: true } });
+  app.submit('#publish-form', {
+    name: 'Bright watering can', category: 'watering_can',
+    description: 'Five litres, lives by the back door.'
+  });
+  await app.flush();
+  const toolId = app.run('state.tools[0].id');
+  assert.equal(app.run('state.tools[0].availability'), 'available');
+
+  /* ---- 2. no action yet: 02 cannot offer a loan it has nothing to attach to ---- */
+  app.run("location.hash='#task';render()");
+  assert.equal(app.run('state.loans.length'), 0, 'browsing 02 never invents a loan');
+  assert.ok(!app.html().includes('data-lend'), 'the choice needs the action first');
+  assert.match(app.html(), /requirement ghost/, 'template needs are previewed without offering a loan');
+
+  /* ---- 3. the action has to need the tool: flowerbed care wants a can and a trowel ---- */
+  app.click({ dataset: { template: 'flowerbed_care' } });
+  await app.flush();
+  const canId = app.run("state.tasks[0].requirements.find(r=>r.category==='watering_can').id");
+  const trowelId = app.run("state.tasks[0].requirements.find(r=>r.category==='hand_trowel').id");
+  assert.match(app.html(), new RegExp(`data-lend="${toolId}" data-req="${canId}"`),
+    'alice owns the can the action needs, so the optional choice appears');
+  assert.ok(!app.html().includes(`data-req="${trowelId}" data-lend`),
+    'alice owns no trowel, and the action needs one — no choice is invented');
+  assert.equal((app.html().match(/data-lend=/g) || []).length, 1);
+  assert.match(app.html(), /Optional · your own registered tool, booked for this action/);
+
+  /* ---- 4. ticking it creates a real loan, and the tool is reserved ---- */
+  app.change({ dataset: { lend: toolId, req: canId }, checked: true });
+  await app.flush();
+  assert.equal(app.run("state.loans.filter(l=>l.status==='pending').length"), 1);
+  assert.equal(app.run('state.loans[0].owner_id === state.loans[0].borrower_id'), true, 'a self-lend names the owner twice');
+  assert.equal(app.run('state.loans[0].tool_id'), toolId);
+  assert.equal(app.run('state.loans[0].requirement_id'), canId);
+  assert.equal(app.run(`state.tools.find(t=>t.id==='${toolId}').availability`), 'reserved',
+    'the tool leaves the neighbourhood list like any borrowed tool');
+  assert.equal(app.run("state.tasks[0].requirements.find(r=>r.category==='watering_can').state"), 'pending');
+  assert.match(app.html(), /Lent by you · Bright watering can/);
+  assert.match(app.html(), /Awaiting your confirmation/, 'the self-lend reads as your own confirmation, not a neighbour’s');
+
+  /* ---- 5. 03 / Tell the story carries the “borrowed” mark ---- */
+  assert.match(app.html(), /id="lent-marks"/);
+  assert.match(app.html(), /<span class="lent-tag">borrowed<\/span>/);
+  assert.match(app.html(), /Lent by you to this action · Awaiting your confirmation/);
+
+  /* ---- 6. unticking it releases the tool again (cancel while pending) ---- */
+  app.change({ dataset: { lend: toolId, req: canId }, checked: false });
+  await app.flush();
+  assert.equal(app.run("state.loans.filter(l=>l.status==='cancelled').length"), 1);
+  assert.equal(app.run(`state.tools.find(t=>t.id==='${toolId}').availability`), 'available');
+  assert.equal(app.run("state.tasks[0].requirements.find(r=>r.category==='watering_can').state"), 'missing');
+  assert.ok(!app.html().includes('id="lent-marks"'), 'a released tool leaves no borrowed mark in 03');
+
+  /* ---- 7. lend it again and drive the record through the state machine ---- */
+  app.change({ dataset: { lend: toolId, req: canId }, checked: true });
+  await app.flush();
+  const loanId = app.run("state.loans.find(l=>l.status==='pending').id");
+  app.run("location.hash='#loans';render()");
+  assert.match(app.html(), /Your own tool · lent to your community action/, 'no “Alice borrowing from Alice”');
+  app.click({ dataset: { transition: 'accept', id: loanId } });
+  await app.flush();
+  app.run("location.hash='#task';render()");
+  assert.match(app.html(), /Reservation accepted · hand it over on the day/);
+  app.run("location.hash='#loans';render()");
+  app.click({ dataset: { transition: 'hand-over', id: loanId } });
+  await app.flush();
+  assert.equal(app.run(`state.tools.find(t=>t.id==='${toolId}').availability`), 'on_loan');
+  app.click({ dataset: { transition: 'return', id: loanId } });
+  await app.flush();
+  assert.equal(app.run("state.tasks[0].requirements.find(r=>r.category==='watering_can').state"), 'fulfilled',
+    'a returned self-lend fulfils its requirement like any other loan');
+  assert.equal(app.run(`state.tools.find(t=>t.id==='${toolId}').availability`), 'available');
+  app.run("location.hash='#task';render()");
+  assert.match(app.html(), /Lent by you to this action · Returned · ready to share again/);
+
+  /* every self-lend write used a fresh Idempotency-Key UUID */
+  const selfLendWrites = app.server.writes.filter(w => /\/loans$/.test(w.path));
+  assert.equal(selfLendWrites.length, 2, 'two self-lends (one cancelled, one driven home)');
+  selfLendWrites.forEach(w => assert.match(w.key, UUID_RE));
+});
+
+/* 02 is optional: getting the tools together never gates the report. The
+   organiser can record an open action while every requirement is still
+   missing, and the story then shows up on the street strip like any other. */
+test('02 is optional: an action records even while its tools are unconfirmed', async () => {
+  const app = createApp();
+  await app.flush();
+  await signIn(app, 'alice');
+  app.run("location.hash='#task';render()");
+  app.click({ dataset: { template: 'park_cleanup' } });
+  await app.flush();
+
+  assert.match(app.html(), /0 of 2 requirements confirmed/);
+  assert.equal(app.run('state.tasks[0].completion_eligible'), false);
+  assert.equal(app.run('state.tasks[0].coordination_ready'), false);
+  assert.match(app.html(), /checklist is optional/, 'the hint is shown, not a block');
+  assert.ok(!/id="complete-task"[^>]*disabled/.test(app.html()), 'the checklist never disables the button');
+
+  app.element('#outcome-note').value = 'Picked up litter along the path.';
+  app.click({ id: 'complete-task' });
+  await app.flush();
+
+  assert.equal(app.run('state.tasks[0].status'), 'completed');
+  assert.equal(app.run('state.tasks[0].outcome.note'), 'Picked up litter along the path.');
+  assert.equal(app.run('state.tasks[0].outcome.bags_collected'), null);
+  assert.equal(app.run('state.tasks[0].completion_eligible'), false,
+    'the derived flag keeps reporting the checklist, it just no longer blocks');
+  const states = app.run('state.tasks[0].requirements.map(r=>r.state).join(",")');
+  assert.ok(states.split(',').every(s => s === 'missing' || s === 'match_available'), states);
+  assert.equal(app.run("state.loans.length"), 0, 'recording an action never invents a loan');
+  assert.match(app.html(), /Picked up litter along the path\./, 'the recorded story stays readable in 03');
+
+  /* the same story flows into the street strip, tools or no tools */
+  app.run("location.hash='#community';render()");
+  assert.match(app.html(), /Stories from the street/);
+  assert.match(app.html(), /Picked up litter along the path\./);
+  assert.match(app.html(), /class="story-card"/);
+});

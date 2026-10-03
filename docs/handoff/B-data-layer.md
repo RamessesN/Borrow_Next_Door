@@ -106,9 +106,9 @@
 - `status` 只有 `open` / `completed` 两态（旧模型的 `planning` 已废弃，见 §8）。
 - `place`：`{name, latitude, longitude, source, source_id}`，`source` ∈ `osm` / `manual` / `fixture`。place 坐标距用户社区中心必须 ≤2000m，否则 422 `OUT_OF_RANGE`。
 - `requirements` 由服务端从模板生成，创建任务时客户端不能传。
-- `coordination_ready` / `completion_eligible` 为服务端派生布尔：
+- `coordination_ready` / `completion_eligible` 为服务端派生布尔（**仅作进度展示，不卡任何写入**）：
   - `coordination_ready`：全部需求 state ∈ {`self_supplied`, `confirmed`, `in_use`, `fulfilled`}。
-  - `completion_eligible`：全部需求 state ∈ {`self_supplied`, `in_use`, `fulfilled`}——注意 `confirmed` 不算：预约已接受但尚未交接，任务尚不可完成。
+  - `completion_eligible`：全部需求 state ∈ {`self_supplied`, `in_use`, `fulfilled`}——注意 `confirmed` 不算：预约已接受但尚未交接。两个布尔只用来告诉界面「工具凑齐了没」，提交成果不看它们（见 §4.2）。
 - `outcome`：完成前为 `null`；完成后为 `{"note": "...", "bags_collected": 4, "volunteer_minutes": 90, "verification": "self_reported"}`。**没有 `would_have_bought_new` 字段**（旧模型问卷字段已移除）。`bags_collected` / `volunteer_minutes` 为创建者自报，未填为 `null`——**`null` ≠ `0`**：`null` 表示未采集（界面显示 "Not collected yet"），`0` 表示填了 0。
 
 ### 3.3 TaskRequirement
@@ -187,7 +187,7 @@ pending ──accept──> accepted ──hand-over──> on_loan ──return
 open ──POST /api/v1/tasks/{id}/complete──> completed
 ```
 
-- 完成条件：`completion_eligible` 为 true（全部需求已落实：自备 / 已交接 / 已归还）。存在 `pending` / `accepted` 需求或需求未满足时 409 `TASK_NOT_READY`；重复完成 409 `TASK_ALREADY_COMPLETED`。
+- 完成条件：**只要任务仍是 `open` 且由创建者本人提交**即可（02 的工具清单是可选项，不参与判定）；重复完成 409 `TASK_ALREADY_COMPLETED`。`completion_eligible` / `coordination_ready` 仍会返回，但仅作进度展示。
 - 完成请求体：`{"outcome_note": "...", "bags_collected": 4, "volunteer_minutes": 90}`；服务端写入 `outcome` 并置 `verification: "self_reported"`。
 - 归还工具**不会**自动完成任务——任务完成必须由创建者单独提交。
 

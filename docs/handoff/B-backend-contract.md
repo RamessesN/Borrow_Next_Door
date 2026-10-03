@@ -43,7 +43,7 @@
 |---|---|
 | `PATCH /api/loans/{id}` 改 status | 动作端点 `POST /api/v1/loans/{id}/accept\|reject\|cancel\|hand-over\|return` |
 | 工具状态由前端联动 | `availability` 由服务端按借用 / 归档派生 |
-| 任务完成 = 改 status | `POST /api/v1/tasks/{id}/complete`（body `outcome_note` / `bags_collected` / `volunteer_minutes`），需 `completion_eligible` |
+| 任务完成 = 改 status | `POST /api/v1/tasks/{id}/complete`（body `outcome_note` / `bags_collected` / `volunteer_minutes`），任务仍 `open` 且创建者本人提交即可；工具清单不参与判定（2026-10-03 决定，原 `TASK_NOT_READY` 检查已移除） |
 | 自备 = 改 `source_type` | `PUT /api/v1/tasks/{id}/requirements/{rid}/self-supply`（body `{"self_supplied": bool}`） |
 | 并发靠前端拦 | 服务端部分唯一索引：409 `TOOL_UNAVAILABLE` / `REQUIREMENT_OCCUPIED` |
 

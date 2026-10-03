@@ -34,7 +34,6 @@ ERROR_STATUS: dict[str, int] = {
     "REQUIREMENT_LOCKED": 409,
     "REQUIREMENT_ALREADY_FULFILLED": 409,
     "INVALID_TRANSITION": 409,
-    "TASK_NOT_READY": 409,
     "TASK_ALREADY_COMPLETED": 409,
     "IDEMPOTENCY_KEY_REUSED": 409,
     # 422
@@ -65,7 +64,6 @@ DEFAULT_MESSAGES: dict[str, str] = {
     "REQUIREMENT_LOCKED": "This requirement cannot be changed in its current state.",
     "REQUIREMENT_ALREADY_FULFILLED": "This requirement has already been fulfilled.",
     "INVALID_TRANSITION": "The loan is not in a state that allows this action.",
-    "TASK_NOT_READY": "The task does not meet its completion conditions.",
     "TASK_ALREADY_COMPLETED": "The task is already completed.",
     "IDEMPOTENCY_KEY_REUSED": "This Idempotency-Key was used for a different request.",
     "VALIDATION_ERROR": "Request validation failed.",

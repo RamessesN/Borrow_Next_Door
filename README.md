@@ -27,14 +27,14 @@ The script tries to open the browser automatically. If it does not, visit http:/
 
 ### 3. Sign in as Alice / Bob / Carol
 
-Pick a **demo account** on the login panel and click sign in — no access code needed. All three live on home street `EH8 9AB`. A fresh seed ships 3 tools there: Alice's watering can and hand trowel, and Bob's reusable gloves.
+Pick a **demo account** on the login panel and click sign in — no access code needed. All three live on home street `EH8 9AB`. A fresh seed ships 3 tools there (Alice's watering can and hand trowel, and Bob's reusable gloves) and 2 already-recorded street stories; `EH14 4AS` gets 2 more.
 
 The second demo street with tools is `EH14 4AS`, where Dora / Eve hold 4 tools: a long-handled litter picker, a spare glove pair, a copper watering can and a wide garden trowel. Dora / Eve are not in the login picker — browse to their postcode to see their tools.
 
 ### 4. What the three tabs do
 
-- **The neighbourhood (`#community`)**: environmental cards for the postcode, the `Postcode green context score`, and the tool list. Filter or search tools, click `Lend a tool` to publish one, or request a borrow.
-- **Make a difference (`#task`)**: choose the `Park cleanup` or `Flowerbed care` template, borrow each required tool or mark it self-supplied, and watch the progress. Once the action is done, record the outcome note, bags collected and volunteer minutes.
+- **The neighbourhood (`#community`)**: environmental cards for the postcode, the `Postcode green context score`, and the tool list. `Stories from the street` (between the hero and the environment cards) rotates the latest recorded outcomes of this street — who did what, read straight from the shared task records. Filter or search tools, click `Lend a tool` to publish one, or request a borrow.
+- **Make a difference (`#task`)**: choose the `Park cleanup` or `Flowerbed care` template, borrow each required tool, lend your own registered tool to the action, or mark it self-supplied, and watch the progress. Getting the tools together is optional — once the action is done, record the outcome note whether or not the checklist is complete; 03 keeps your latest story and the slot to record the next one.
 - **My borrowing (`#loans`)**: `I’m borrowing` lists what you borrowed, `I’m lending` what others requested from you. The lender confirms in order: accept, hand over, return. Request sent, reservation accepted, hand-over and return are four separate facts.
 
 ### 5. Enter a postcode — you really move to that street
@@ -63,7 +63,9 @@ Use **two independent browser sessions**: for example a normal window signed in 
 4. **Alice requests the tool**: on the litter-picker row pick Bob's new tool and click `Request from Bob`. It becomes a pending request and the tool is reserved — not yet handed over.
 5. **Bob accepts and hands over**: refresh B, open `I’m lending`, find the request, click `Accept request`, then confirm the hand-over. States move through `accepted` and `on_loan`; refresh A to see the action progress update.
 6. **Do the action and return**: assume the clean-up happened and Alice gives the tool back; Bob confirms the return on B. The tool is borrowable again, the loan records `returned`, and Alice's requirement becomes `fulfilled`.
-7. **Alice records the outcome**: refresh A, go back to the action tab and submit the outcome note, bags collected and volunteer minutes. Check the completed action and returned-loans metrics. Outcomes are **self-reported** — not externally verified and never presented as proof of regional environmental improvement.
+7. **Alice records the outcome**: refresh A, go back to the action tab and submit the outcome note. The tool checklist does **not** gate this — an action can be recorded with requirements still unconfirmed (the panel keeps showing them as its own progress). Check the completed action and returned-loans metrics. Refresh either window's home page: the new story now rotates in `Stories from the street`, and Bob sees the same story because it is read from the shared task records. Outcomes are **self-reported** — not externally verified and never presented as proof of regional environmental improvement.
+
+**Optional detour — lending your own tool to your own action**: Alice's seed account already owns a watering can and a hand trowel, which is exactly what `Flowerbed care` asks for. Choose that template instead and step 02 offers an optional `Lend my …` checkbox for each tool she owns *and* the action needs (no checkbox for tools she does not own). Ticking it creates a real loan record — the owner and the borrower are both Alice — so the tool shows as `Reserved` in the neighbourhood list and step 03 keeps a `borrowed` mark for it. Untick it before the hand-over to release the tool again; after that, confirm the booking, hand it over and return it from `I’m lending` like any other loan.
 
 ### 7. The map card and the nearest borrowable tool
 
@@ -109,13 +111,14 @@ Development ports can be overridden with `BACKEND_PORT=8100 FRONTEND_PORT=5200 .
 
 ## Scope and known limitations
 
-**Done**: access-code-free demo login, tool publishing/browsing, the backend loan state machine, task templates with per-category requirements, self-reported outcomes, community environment adapters with cache/degradation, green-space list and context score card, home/postcode browsing, two demo streets with tools, the map algorithm module. Template switching reuses an existing open task and keeps its progress instead of creating duplicates.
+**Done**: access-code-free demo login, tool publishing/browsing, the backend loan state machine, task templates with per-category requirements, optional self-lending of your own registered tool to your own action (owner == borrower, B's one self-loan exception), outcomes recorded independently of the tool checklist, the `Stories from the street` strip with seeded demo stories on both streets, self-reported outcomes, community environment adapters with cache/degradation, green-space list and context score card, home/postcode browsing, two demo streets with tools, the map algorithm module. Template switching reuses an existing open task and keeps its progress instead of creating duplicates.
 
 **Not done / deferred**:
 
 - Photo upload and outcome photo storage.
 - Multiple tool slots per category / multi-quantity requirements (each template currently has one requirement per category, `quantity=1`).
 - The `would_have_bought_new` survey and "purchases avoided" metric.
+- The `Bags collected` / `Volunteer minutes` outcome fields still exist in the backend contract (`outcome.bags_collected` / `outcome.volunteer_minutes`, both optional) but no screen collects them any more, so the impact panel shows them as not collected rather than as 0.
 - Real registration/resident verification, production auth, real road navigation, live multi-user push, load and long-run stability testing.
 
 External network conditions affect environmental data; the borrow flow does not depend on external environment APIs succeeding. Map UI wiring was integrated in parallel — module unit tests and mock-DOM map tests were verified, real-browser map interaction was not acceptance-tested. We also keep an `EH16 5AA` fixture without tools for distance-boundary tests, so the seed database has 3 communities in total while the demo streets with tools are the 2 above.

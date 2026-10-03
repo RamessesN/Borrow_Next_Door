@@ -378,7 +378,8 @@ function createMockBackend(options) {
           task.volunteer_minutes === (body ? body.volunteer_minutes : null);
         return same ? rememberIdem(entry, ok(view)) : fail(409, 'TASK_ALREADY_COMPLETED', 'This action has already been recorded.');
       }
-      if (!view.completion_eligible) return fail(409, 'TASK_NOT_READY', 'The task does not meet its completion conditions.');
+      // Getting the tools together is optional: an open action can be recorded
+      // with requirements still missing, pending or unconfirmed.
       task.status = 'completed';
       task.outcome_note = body.outcome_note;
       task.bags_collected = body.bags_collected ?? null;
@@ -461,20 +462,30 @@ function createMockBackend(options) {
       if (entry.body) return entry;
       const tool = db.tools.find(t => t.id === (body && body.tool_id));
       if (!tool) return fail(404, 'NOT_FOUND', 'Tool not found.');
-      if (tool.owner_alias === viewer.alias) return fail(403, 'SELF_BORROW_FORBIDDEN', 'You cannot borrow your own tool.');
       if (tool.is_archived) return fail(409, 'TOOL_ARCHIVED', 'This tool has been archived.');
-      if (tool.availability !== 'available') return fail(409, 'TOOL_UNAVAILABLE', 'This tool is already reserved or on loan.');
+      const requirementId = (body && body.requirement_id) || null;
       let task = null;
-      if (body && body.requirement_id) {
-        task = db.tasks.find(t => t.requirements.some(r => r.id === body.requirement_id));
-        if (!task) return fail(404, 'NOT_FOUND', 'Requirement not found.');
-        const occupied = db.loans.some(l => l.requirement_id === body.requirement_id && ACTIVE.includes(l.status));
+      if (requirementId) {
+        task = db.tasks.find(t => t.requirements.some(r => r.id === requirementId)) || null;
+        if (!task || task.creator_alias !== viewer.alias) {
+          // Another organiser's requirement is invisible, like the real backend.
+          return fail(404, 'NOT_FOUND', 'Requirement not found.');
+        }
+      }
+      // The owner never borrows their own tool; the one self-loan the real
+      // backend allows is lending it to a requirement of your own open action.
+      if (tool.owner_alias === viewer.alias && !task) {
+        return fail(403, 'SELF_BORROW_FORBIDDEN', 'You cannot borrow your own tool.');
+      }
+      if (tool.availability !== 'available') return fail(409, 'TOOL_UNAVAILABLE', 'This tool is already reserved or on loan.');
+      if (requirementId) {
+        const occupied = db.loans.some(l => l.requirement_id === requirementId && ACTIVE.includes(l.status));
         if (occupied) return fail(409, 'REQUIREMENT_OCCUPIED', 'That requirement already has an active loan.');
       }
       const loan = {
         id: newId('l'), tool_id: tool.id, tool_name: tool.name,
         owner_id: users[tool.owner_alias].id, borrower_id: viewer.id,
-        requirement_id: (body && body.requirement_id) || null,
+        requirement_id: requirementId,
         task_id: task ? task.id : null, status: 'pending',
         note: (body && body.note) || '', created_at: now(), updated_at: now(),
         accepted_at: null, handed_over_at: null, returned_at: null, rejected_at: null, cancelled_at: null

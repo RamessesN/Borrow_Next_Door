@@ -566,6 +566,43 @@ function taskPlacePanel(task) {
   return `<fieldset class="place-panel" id="task-place-panel"><legend>Where are we helping?</legend><label class="place-option"><input type="radio" name="task-place" data-task-place="" value="" ${selected.source === 'fixture' ? 'checked' : ''}><span><b>${esc(defaultTaskPlace().name)}</b><small>Community centre · default meeting point</small></span></label>${rows}${options.length ? '' : '<small class="muted">Green spaces appear when the environment card has data</small>'}</fieldset><p class="notice">Choose a meeting point, then pick an action. Nothing is saved until you pick an action. Actions stay within 2 km of ${esc(homePostcode())}.</p>`;
 }
 const LOCKED_STATES = ['pending', 'confirmed', 'in_use', 'fulfilled'];
+/* A self-loan is your own tool lent to your own action (B's one exception to
+   SELF_BORROW_FORBIDDEN), so it is a real loan record — but nobody is waiting
+   for a neighbour. */
+const SELF_LEND_PILL = {
+  pending: 'borrowed · awaiting your confirmation', accepted: 'borrowed · reservation confirmed',
+  on_loan: 'borrowed · handed over', returned: 'returned · ready to share again',
+  rejected: 'declined', cancelled: 'cancelled'
+};
+const SELF_LEND_NOTE = {
+  pending: 'Awaiting your confirmation', accepted: 'Reservation accepted · hand it over on the day',
+  on_loan: 'Handed over · on loan for this action', returned: 'Returned · ready to share again'
+};
+/**
+ * The optional “lend my tool” choice in 02. It appears only when both
+ * preconditions hold: the signed-in organiser owns a free registered tool of
+ * this requirement's category, and the action picked in 01 asks for that
+ * category. Checking it creates a real loan (owner == borrower), so the tool
+ * leaves the neighbourhood list as `reserved` and 03 can label the action
+ * “borrowed”. Unticking releases it again while it is still pending/accepted.
+ */
+function lendChoice(row, task, viewerIsOrganiser) {
+  if (!viewerIsOrganiser || task.status !== 'open') return '';
+  const me = state.me;
+  const live = row.loans
+    .filter(l => l.selfLend && String(l.borrowerId) === String(me.id) && D.LOAN_ACTIVE.includes(l.status))
+    .sort((a, b) => b.stageOrder - a.stageOrder)[0] || null;
+  if (live) {
+    return `<label class="lend-choice on"><input type="checkbox" data-lend="${esc(live.toolId)}" data-req="${esc(row.requirementId)}" checked><span><b>Lend my ${esc(live.toolName)}</b><small>Optional · booked for this action — untick to release it again</small></span></label>`;
+  }
+  if (row.state !== 'missing' && row.state !== 'match_available') return '';
+  // The same guards the borrow button uses: never offer a tool that is out,
+  // archived, or further away than the backend's 2 km borrow range.
+  const mine = state.tools.filter(t => t.owner.id === me.id && t.category === row.category && !t.is_archived &&
+    t.availability === 'available' && !(typeof t.distance_m === 'number' && t.distance_m > 2000));
+  if (!mine.length) return '';
+  return `<label class="lend-choice"><input type="checkbox" data-lend="${esc(mine[0].id)}" data-req="${esc(row.requirementId)}"><span><b>Lend my ${esc(mine[0].name)}</b><small>Optional · your own registered tool, booked for this action</small></span></label>`;
+}
 function requirementRow(row, task) {
   const own = row.loans.slice().sort((a, b) => b.stageOrder - a.stageOrder)[0];
   const viewerIsOrganiser = !!(task && state.me && task.creator && task.creator.id === state.me.id);
@@ -579,11 +616,24 @@ function requirementRow(row, task) {
   if (row.state === 'match_available' && row.tools.length > 1) notes.push(`${row.tools.length} neighbours could help`);
   const note = notes.length ? `<small class="muted">${esc(notes.join(' · '))}</small>` : '';
   const mark = row.confirmed ? '✓ ' : row.pending ? '⋯ ' : row.state === 'match_available' ? '↗ ' : '○ ';
-  return `<div class="requirement state-${row.state}"><div><b>${esc(row.label)}</b><small>${mark}${esc(row.statusText)}</small>${own ? `<span class="pill">${esc(own.stageLabel)} · ${esc(own.toolName)}</span>` : ''}${note}</div><div class="req-actions">${request}<label><input type="checkbox" data-self="${esc(row.requirementId)}" ${row.selfSupplied ? 'checked' : ''} ${locked ? 'disabled' : ''}> I'll bring my own</label></div></div>`;
+  const ownPill = own
+    ? `<span class="pill${own.selfLend ? ' lent' : ''}">${esc(own.selfLend ? `Lent by you · ${own.toolName}` : `${own.stageLabel} · ${own.toolName}`)}</span>`
+    : '';
+  return `<div class="requirement state-${row.state}"><div><b>${esc(row.label)}</b><small>${mark}${esc(row.statusText)}</small>${ownPill}${note}</div><div class="req-actions">${request}${lendChoice(row, task, viewerIsOrganiser)}<label><input type="checkbox" data-self="${esc(row.requirementId)}" ${row.selfSupplied ? 'checked' : ''} ${locked ? 'disabled' : ''}> I'll bring my own</label></div></div>`;
 }
 function wantedStrip(board) {
   if (!board.length) return '';
   return `<div class="wanted-strip"><span class="eyebrow">NEIGHBOURS NEEDED</span><div class="wanted-tags">${board.map(e => `<span class="chip">${esc(e.label)} · ${e.slots}</span>`).join('')}</div><small>Each of these is a slot a neighbour could fill today. Publishing one tool can unlock an action for everyone.</small></div>`;
+}
+/* 03 / Tell the story: a tool the organiser lent to this action keeps the
+   “borrowed” mark the checklist created in 02 — it is a real loan record, so
+   the mark follows the loan status instead of being a decoration. */
+function selfLendMarks(task) {
+  if (!task || !state.me) return '';
+  const loans = state.loans.filter(l => l.task_id === task.id && l.owner_id === state.me.id && l.borrower_id === state.me.id &&
+    ['pending', 'accepted', 'on_loan', 'returned'].includes(l.status));
+  if (!loans.length) return '';
+  return `<div class="lent-marks" id="lent-marks">${loans.map(l => `<div class="lent-mark"><span class="lent-tag">borrowed</span><div><b>${esc(l.tool_name)}</b><small>Lent by you to this action · ${esc(SELF_LEND_NOTE[l.status] || l.status)}</small></div></div>`).join('')}</div>`;
 }
 function impactPanel(report) {
   const cells = report.metrics.map(m => `<div class="impact-metric ${m.available ? '' : 'pending'}"><strong>${m.available ? m.value : '—'}</strong><small>${esc(m.label)}</small><span class="status-tag">${m.available ? esc(m.basis) : 'Not collected yet'}</span></div>`).join('');
@@ -622,13 +672,15 @@ function taskPage() {
       }).join('')
     }`
   ) + wantedStrip(board);
-  const story = (() => {
+  const story = selfLendMarks(storyTask) + (() => {
     // Same skeleton for everyone: your latest story, then the recording slot.
     const recordedBlock = recorded
       ? `<p class="muted">Recorded ${esc(String(storyTask.completed_at || '').slice(0, 16).replace('T', ' '))} UTC.</p><div class="story-quote">${esc(recorded.note)}</div><p class="notice">Self-reported by the organiser. Returns are counted separately from this report.</p>`
       : `<p class="muted">Nothing recorded yet — your finished actions will appear here.</p>`;
+    // 02 is optional: the checklist only adds a hint above the button, it never
+    // disables the recording slot.
     const formBlock = task && task.status === 'open'
-      ? `<label>Your outcome<textarea id="outcome-note" maxlength="500" placeholder="What did you do for your neighbourhood?"></textarea></label>${readiness && readiness.warning ? `<p class="notice">${esc(readiness.warning)}</p>` : ''}<button class="btn primary" id="complete-task" ${readiness && !readiness.canSubmit ? 'disabled' : ''}>Record completed action ↗</button><p class="muted">Completion is self-reported by the organiser. A returned tool does not complete an action.</p>`
+      ? `<label>Your outcome<textarea id="outcome-note" maxlength="500" placeholder="What did you do for your neighbourhood?"></textarea></label>${readiness && readiness.warning ? `<p class="notice">${esc(readiness.warning)}</p>` : ''}<button class="btn primary" id="complete-task">Record completed action ↗</button><p class="muted">Completion is self-reported by the organiser. A returned tool does not complete an action.</p>`
       : `<p class="muted">Nothing to record right now — pick an action below, bring the tools together, then tell its story here.</p>`;
     return `<div class="story-latest"><span class="eyebrow">LATEST STORY</span>${recordedBlock}</div><div class="story-form"><span class="eyebrow">RECORD AN ACTION</span>${formBlock}</div>`;
   })();
@@ -648,15 +700,23 @@ function loansPage() {
     const tool = toolOf(l.tool_id);
     const postcodeOf = tool ? tool.community.postcode : homePostcode();
     const btn = (action, cls, label) => `<button class="btn ${cls} small" data-transition="${action}" data-id="${esc(l.id)}">${label}</button>`;
+    /* A self-lend is your own tool booked for your own action: the owner and
+       the borrower are the same person, so the wording avoids “Alice
+       borrowing from Alice”. */
+    const selfLend = l.owner_id === l.borrower_id;
     let actions = '';
     if (l.status === 'pending') actions = isOwner
-      ? btn('reject', 'secondary', 'Decline') + btn('accept', 'primary', 'Accept request')
+      ? btn('reject', 'secondary', selfLend ? 'Release the tool' : 'Decline') + btn('accept', 'primary', selfLend ? 'Confirm the booking' : 'Accept request')
       : btn('cancel', 'secondary', 'Cancel request');
     if (l.status === 'accepted') actions = isOwner
       ? btn('hand-over', 'primary', 'Confirm handover')
       : btn('cancel', 'secondary', 'Cancel request');
     if (l.status === 'on_loan' && isOwner) actions = btn('return', 'primary', 'Confirm returned');
-    return `<article class="loan-card"><div><h3>${esc(l.tool_name)}</h3><p>${esc(nameOf(l.borrower_id))} borrowing from ${esc(nameOf(l.owner_id))} · ${esc(postcodeOf)}</p><span class="pill">${esc(LOAN_PILL[l.status] || l.status)}</span></div><div class="loan-actions">${actions}</div></article>`;
+    const who = selfLend
+      ? 'Your own tool · lent to your community action'
+      : `${esc(nameOf(l.borrower_id))} borrowing from ${esc(nameOf(l.owner_id))}`;
+    const pill = selfLend ? (SELF_LEND_PILL[l.status] || l.status) : (LOAN_PILL[l.status] || l.status);
+    return `<article class="loan-card${selfLend ? ' self-lend' : ''}"><div><h3>${esc(l.tool_name)}</h3><p>${who} · ${esc(postcodeOf)}</p><span class="pill">${esc(pill)}</span></div><div class="loan-actions">${actions}</div></article>`;
   }).join('') : `<div class="empty"><h3>${ui.loanTab === 'borrowed' ? 'Your next project starts next door.' : 'A spare tool can make someone’s day.'}</h3><p>${ui.loanTab === 'borrowed' ? 'Your borrowing requests will appear here.' : 'Requests for your tools will appear here.'}</p><a class="btn secondary" href="#community">Explore the neighbourhood ↗</a></div>`}<p class="notice">Only the tool’s owner can accept, hand over and confirm a return. Sign out and switch demo accounts to respond as your neighbour.</p>`;
 }
 
@@ -826,11 +886,60 @@ async function selfSupply(requirementId, checked, input) {
     toast(checked ? 'Marked as “I’ll bring my own”.' : 'Back to borrowing from a neighbour.');
   }, { onError: () => { if (input) input.checked = !checked; } });
 }
+/*
+ * The optional “lend my tool” choice in 02: my own registered tool booked for
+ * a requirement of my own open action. B records it as a real loan (owner ==
+ * borrower), so the tool is reserved in the neighbourhood list and 03 can
+ * mark the action “borrowed”. Unticking cancels the request again while it is
+ * still pending or merely accepted; once handed over it must come back first.
+ */
+async function lendOwnTool(toolId, requirementId, checked, input) {
+  if (!myOpenTask()) return;
+  const requirement = String(requirementId).split('#')[0];
+  const revert = () => { if (input) input.checked = !checked; };
+  const selfLendLoan = () => state.loans.find(l => l.requirement_id === requirement &&
+    l.owner_id === state.me.id && l.borrower_id === state.me.id && D.LOAN_ACTIVE.includes(l.status));
+  if (checked) {
+    const tool = state.tools.find(t => t.id === toolId);
+    const tooFar = tool && typeof tool.distance_m === 'number' && tool.distance_m > 2000;
+    if (!tool || tool.is_archived) {
+      revert(); toast('That tool is no longer listed.'); render(); return;
+    }
+    if (tool.availability !== 'available') {
+      revert(); toast('This tool is already reserved or on loan.'); render(); return;
+    }
+    if (tooFar) {
+      revert(); toast('That tool is in another neighbourhood. The action borrows within 2 km of your street.'); return;
+    }
+  } else {
+    const live = selfLendLoan();
+    if (!live) { render(); return; }
+    if (live.status === 'on_loan') {
+      revert(); toast('This tool is already handed over — return it from My borrowing first.'); return;
+    }
+  }
+  await action(null, async () => {
+    if (checked) {
+      await client.createLoan({ tool_id: toolId, requirement_id: requirement });
+      await refresh();
+      render();
+      toast('Your tool is booked for this action. Confirm it under My borrowing → I’m lending.');
+      return;
+    }
+    const live = selfLendLoan();
+    if (!live) return;
+    await client.loanAction(live.id, 'cancel');
+    await refresh();
+    render();
+    toast('Your tool is free to share again.');
+  }, { onError: revert });
+}
 async function completeTask(btn) {
   const task = myOpenTask();
   if (!task) return;
   const readiness = D.outcomeReadiness(task, taskContext(task));
-  if (!readiness.canSubmit) { toast(readiness.warning || 'This action cannot be recorded yet.'); return; }
+  // 02 is optional: the checklist never blocks the report, it only adds a hint.
+  if (!readiness.canSubmit) { toast('This action has already been recorded.'); return; }
   const noteEl = $('#outcome-note');
   const note = String(noteEl && noteEl.value || '').trim();
   if (!note) { toast('Add a short outcome before recording your action.'); if (noteEl && noteEl.focus) noteEl.focus(); return; }
@@ -897,6 +1006,7 @@ document.addEventListener('change', e => {
     return;
   }
   if (e.target.dataset && e.target.dataset.self) selfSupply(e.target.dataset.self, e.target.checked, e.target);
+  if (e.target.dataset && e.target.dataset.lend) lendOwnTool(e.target.dataset.lend, e.target.dataset.req, e.target.checked, e.target);
 });
 document.addEventListener('submit', e => {
   e.preventDefault();

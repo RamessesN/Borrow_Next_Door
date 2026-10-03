@@ -285,6 +285,108 @@ def test_borrow_own_tool_forbidden(client, alice_token):
     assert resp.json()["error"]["code"] == "SELF_BORROW_FORBIDDEN"
 
 
+def _create_task(client, token, template_id="flowerbed_care"):
+    resp = client.post(
+        "/api/v1/tasks",
+        json={"template_id": template_id},
+        headers={**_hdr(token), "Idempotency-Key": new_idem_key()},
+    )
+    assert resp.status_code == 201, resp.text
+    return resp.json()["data"]
+
+
+def test_lend_own_tool_to_own_requirement(client, alice_token, bob_token):
+    """The organiser may lend their own registered tool to a requirement of
+    their own open action — the same loan record, state machine and tool
+    reservation as borrowing from a neighbour. A bare self-borrow stays 403
+    and a stranger's requirement stays invisible."""
+    task = _create_task(client, alice_token)
+    watering = next(
+        r for r in task["requirements"] if r["category"] == "watering_can"
+    )
+
+    resp = _request_loan(client, alice_token, T_WATERING, requirement_id=watering["id"])
+    assert resp.status_code == 201, resp.text
+    loan = resp.json()["data"]
+    assert set(loan) == LOAN_FIELDS
+    assert loan["owner_id"] == U_ALICE
+    assert loan["borrower_id"] == U_ALICE, "a self-lend names the owner twice"
+    assert loan["requirement_id"] == watering["id"]
+    assert loan["task_id"] == task["id"]
+    assert loan["status"] == "pending"
+
+    # The requirement is claimed and the tool reserved, exactly like a borrow.
+    detail = client.get(
+        f"/api/v1/tasks/{task['id']}", headers=_hdr(alice_token)
+    ).json()["data"]
+    row = next(r for r in detail["requirements"] if r["category"] == "watering_can")
+    assert row["state"] == "pending"
+    assert row["active_loan_id"] == loan["id"]
+    tools = client.get(
+        "/api/v1/tools", params={"community_id": C_EH8}, headers=_hdr(alice_token)
+    ).json()["data"]
+    assert next(t for t in tools if t["id"] == T_WATERING)["availability"] == "reserved"
+
+    # Somebody else's requirement does not unlock the self-lend: the tool
+    # owner cannot claim a requirement they do not organise (404, spec 4.2).
+    bob_task = _create_task(client, bob_token)
+    bob_watering = next(
+        r for r in bob_task["requirements"] if r["category"] == "watering_can"
+    )
+    denied = _request_loan(client, alice_token, T_WATERING, requirement_id=bob_watering["id"])
+    assert denied.status_code == 404
+    assert denied.json()["error"]["code"] == "NOT_FOUND"
+
+    # The owner drives their own loan through the frozen state machine.
+    for action in ("accept", "hand-over", "return"):
+        moved = _act(client, alice_token, loan["id"], action)
+        assert moved.status_code == 200, moved.text
+    done = _act(client, alice_token, loan["id"], "accept")
+    assert done.status_code == 409
+    assert done.json()["error"]["code"] == "INVALID_TRANSITION"
+    detail = client.get(
+        f"/api/v1/tasks/{task['id']}", headers=_hdr(alice_token)
+    ).json()["data"]
+    row = next(r for r in detail["requirements"] if r["category"] == "watering_can")
+    assert row["state"] == "fulfilled"
+    tools = client.get(
+        "/api/v1/tools", params={"community_id": C_EH8}, headers=_hdr(alice_token)
+    ).json()["data"]
+    assert next(t for t in tools if t["id"] == T_WATERING)["availability"] == "available"
+
+    # A returned self-lend is part of the owner's history on both sides.
+    lent = client.get("/api/v1/loans?role=owner", headers=_hdr(alice_token)).json()["data"]
+    borrowed = client.get("/api/v1/loans?role=borrower", headers=_hdr(alice_token)).json()["data"]
+    assert [l["id"] for l in lent] == [loan["id"]]
+    assert [l["id"] for l in borrowed] == [loan["id"]]
+
+
+def test_self_lend_needs_an_own_requirement(client, alice_token, bob_token):
+    """Without an own requirement, lending your own tool is still borrowing
+    your own tool (403) — and another organiser's requirement does not unlock
+    it either (404, spec 4.2)."""
+    idle = _publish(client, alice_token, category="watering_can")
+    resp = _request_loan(client, alice_token, T_WATERING)
+    assert resp.status_code == 403
+    assert resp.json()["error"]["code"] == "SELF_BORROW_FORBIDDEN"
+    resp = _request_loan(client, alice_token, idle)
+    assert resp.status_code == 403
+    assert resp.json()["error"]["code"] == "SELF_BORROW_FORBIDDEN"
+
+    bob_task = _create_task(client, bob_token)
+    bob_watering = next(
+        r for r in bob_task["requirements"] if r["category"] == "watering_can"
+    )
+    resp = _request_loan(client, alice_token, idle, requirement_id=bob_watering["id"])
+    assert resp.status_code == 404
+    assert resp.json()["error"]["code"] == "NOT_FOUND"
+
+    # An unknown requirement id cannot smuggle a self-borrow in either.
+    resp = _request_loan(client, alice_token, idle, requirement_id="no-such-requirement")
+    assert resp.status_code == 404
+    assert resp.json()["error"]["code"] == "NOT_FOUND"
+
+
 def test_borrow_archived_tool(client, alice_token, bob_token):
     tool_id = _publish(client, alice_token)
     archived = client.post(
