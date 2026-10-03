@@ -570,8 +570,9 @@ function requirementRow(row, task) {
   const own = row.loans.slice().sort((a, b) => b.stageOrder - a.stageOrder)[0];
   const viewerIsOrganiser = !!(task && state.me && task.creator && task.creator.id === state.me.id);
   const locked = task.status !== 'open' || LOCKED_STATES.includes(row.state) || !viewerIsOrganiser;
-  const request = row.state === 'match_available' && row.tools.length
-    ? `<button class="btn secondary small" data-borrow="${esc(row.tools[0].toolId)}" data-req="${esc(row.requirementId)}">Request from ${esc(row.tools[0].ownerName)}</button>`
+  const lendable = row.tools.filter(t => !state.me || !t.ownerId || t.ownerId !== state.me.id);
+  const request = row.state === 'match_available' && lendable.length
+    ? `<button class="btn secondary small" data-borrow="${esc(lendable[0].toolId)}" data-req="${esc(row.requirementId)}">Request from ${esc(lendable[0].ownerName)}</button>`
     : '';
   const top = row.tools[0];
   const notes = [];
@@ -598,7 +599,9 @@ function taskPage() {
   const task = myOpenTask();
   // The story panel also shows the most recent finished action, so the
   // numbers the organiser typed are still readable after completion.
-  const storyTask = task || myTasks().filter(t => t.status === 'completed')
+  // The latest story is always the newest FINISHED action — an in-progress
+  // task must not hide it (it has no outcome yet and belongs in the form slot).
+  const storyTask = myTasks().filter(t => t.status === 'completed' && t.outcome && t.outcome.note)
     .sort((a, b) => String(b.completed_at || b.created_at).localeCompare(String(a.completed_at || a.created_at)))[0] || null;
   const ctx = task ? taskContext(task) : { tools: state.tools, loans: state.loans, names: state.names, viewerId: state.me ? state.me.id : null };
   const progress = task ? D.taskProgress(task, ctx) : null;
@@ -628,7 +631,7 @@ function taskPage() {
       ? `<p class="muted">Recorded ${esc(String(storyTask.completed_at || '').slice(0, 16).replace('T', ' '))} UTC.</p><div class="story-quote">${esc(recorded.note)}</div><p class="notice">Self-reported by the organiser. Returns are counted separately from this report.</p>`
       : `<p class="muted">Nothing recorded yet — your finished actions will appear here.</p>`;
     const formBlock = task && task.status === 'open'
-      ? `<label>Your outcome<textarea id="outcome-note" maxlength="500" placeholder="What did you do for your neighbourhood?"></textarea></label>${readiness && readiness.warning ? `<p class="notice">${esc(readiness.warning)}</p>` : ''}<button class="btn primary" id="complete-task" ${readiness && !readiness.canSubmit ? 'disabled' : ''}>Record completed action ↗</button><p class="muted">Completion is self-reported by the organiser. A returned tool does not complete an action.</p>`
+      ? `<label>Your outcome<textarea id="outcome-note" maxlength="500" placeholder="What did you do for your neighbourhood?"></textarea></label>${readiness && readiness.warning ? `<p class="notice">${esc(readiness.warning)}</p>` : ''}<button class="btn primary" id="complete-task" ${readiness && readiness.canSubmit === false ? 'disabled' : ''}>Record completed action ↗</button><p class="muted">Self-reported by the organiser. Bringing your own tools is optional — resolve any waiting requests first.</p>`
       : `<p class="muted">Nothing to record right now — pick an action below, bring the tools together, then tell its story here.</p>`;
     return `<div class="story-latest"><span class="eyebrow">LATEST STORY</span>${recordedBlock}</div><div class="story-form"><span class="eyebrow">RECORD AN ACTION</span>${formBlock}</div>`;
   })();

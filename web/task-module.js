@@ -130,6 +130,8 @@
   var COORDINATION_STATES = ['self_supplied', 'confirmed', 'in_use', 'fulfilled'];
   /** Satisfied enough to record the outcome (an accepted loan is not). */
   var COMPLETION_STATES = ['self_supplied', 'in_use', 'fulfilled'];
+  // Recording is blocked only while a request is still unresolved.
+  var UNRESOLVED_STATES = ['pending', 'confirmed'];
 
   var PLACE_SOURCES = ['osm', 'manual', 'fixture'];
   var DEFAULT_MATCH_RADIUS_KM = 2;   // backend MATCH_RADIUS_M = 2000
@@ -428,7 +430,7 @@
     if (!task || !Array.isArray(task.requirements)) return task;
     var states = task.requirements.map(function (row) { return row && row.state; });
     task.coordination_ready = states.length > 0 && states.every(function (s) { return inList(COORDINATION_STATES, s); });
-    task.completion_eligible = states.length > 0 && states.every(function (s) { return inList(COMPLETION_STATES, s); });
+    task.completion_eligible = states.length > 0 && states.every(function (s) { return !inList(UNRESOLVED_STATES, s); });
     return task;
   }
 
@@ -1040,7 +1042,7 @@
     }
     return {
       coordination_ready: states.length > 0 && states.every(function (s) { return inList(COORDINATION_STATES, s); }),
-      completion_eligible: states.length > 0 && states.every(function (s) { return inList(COMPLETION_STATES, s); })
+      completion_eligible: states.length > 0 && states.every(function (s) { return !inList(UNRESOLVED_STATES, s); })
     };
   }
 
@@ -1058,7 +1060,7 @@
     var missingCategories = unique(rows.filter(function (r) { return !r.confirmed; }).map(function (r) { return r.category; }));
     var confirmedCategories = unique(rows.filter(function (r) { return r.confirmed; }).map(function (r) { return r.category; }));
     var coordinationReady = total > 0 && confirmed === total;
-    var completionEligible = total > 0 && rows.every(function (r) { return inList(COMPLETION_STATES, r.state); });
+    var completionEligible = total > 0 && rows.every(function (r) { return !inList(UNRESOLVED_STATES, r.state); });
 
     var nextAction;
     if (task.status === 'completed') nextAction = 'Action recorded. Outstanding returns are tracked separately.';
@@ -1314,7 +1316,7 @@
     var canSubmit = task.status !== 'completed' && progress.completionEligible;
     var parts = [];
     if (task.status !== 'completed' && !progress.completionEligible) {
-      parts.push('This action can be recorded once every requirement is self-supplied, in use or fulfilled.');
+      parts.push('Resolve the requests still waiting on a neighbour first — bringing your own tools is optional.');
     }
     if (outstandingReturns > 0) {
       parts.push(outstandingReturns + (outstandingReturns === 1 ? ' tool is' : ' tools are') +
