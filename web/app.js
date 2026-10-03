@@ -1,30 +1,100 @@
-/* Member A: UI shell. Browser demo only; see README before backend integration. */
+/* Member A: UI shell + data layer.
+   Data comes from member B's API through web/api.js — this file holds no
+   business data of its own. localStorage/sessionStorage only ever store the
+   bearer token and the signed-in display name; tools, loans and tasks live on
+   the server and are re-fetched after every successful write.
+   Member D's pure functions (window.BND_TASK) do the display maths, and they
+   consume the same frozen B shapes the API returns (TaskResponse /
+   ToolResponse / LoanResponse). */
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const KEY = 'bnd-demo-v1';
-const names = { alice: 'Alice', bob: 'Bob' };
-/* Member D's task module owns templates, tool matching and impact. It is loaded before this file. */
+/* Member D's task module owns templates, tool matching and impact. Loaded first. */
 const D = window.BND_TASK || globalThis.BND_TASK;
-if(!D) throw new Error('web/task-module.js must be loaded before app.js');
-const categories = Object.fromEntries(Object.entries(D.CATEGORIES).map(([id,c])=>[id,c.label]));
-const templates = Object.fromEntries(D.TEMPLATE_LIST.map(t=>[t.id,t]));
-const seed = () => ({ tools:[
-  {id:'t1',owner_id:'bob',name:'Garden hand trowel',category:'spade',description:'A sturdy little helper for planting days.',status:'available',postcode:'EH8 9YL'},
-  {id:'t2',owner_id:'bob',name:'A pair of helping hands',category:'gloves',description:'Reusable gardening gloves, medium size.',status:'available',postcode:'EH8 9YL'},
-  {id:'t3',owner_id:'bob',name:'The trusty watering can',category:'watering',description:'A green 5 litre watering can.',status:'available',postcode:'EH8 9YL'},
-  {id:'t4',owner_id:'alice',name:'Garden leaf rake',category:'rake',description:'Lightweight rake for leaves and garden care.',status:'available',postcode:'EH8 9YL'}
-],loans:[],tasks:[]});
-let state, storageWarning=false;
-try { state=JSON.parse(localStorage.getItem(KEY)); if(!state || !Array.isArray(state.tools)||!Array.isArray(state.loans)||!Array.isArray(state.tasks)) state=seed(); } catch {state=seed();storageWarning=true;}
-let user='alice', postcode='EH8 9YL', filter='all', search='', loanTab='borrowed';
+if (!D) throw new Error('web/task-module.js must be loaded before app.js');
+const API = window.BND_API || globalThis.BND_API;
+if (!API) throw new Error('web/api.js must be loaded before app.js');
+const client = API.createClient({ baseUrl: window.BND_API_BASE || globalThis.BND_API_BASE });
+
+/* ---------------------------------------------------------------- vocabulary */
+/* B's frozen category slugs drive everything; SVG_KEY only picks the artwork. */
+const SVG_KEY = { litter_picker: 'picker', reusable_gloves: 'gloves', hand_trowel: 'spade', watering_can: 'watering' };
+const LOAN_PILL = {
+  pending: 'Awaiting owner confirmation', accepted: 'Reservation confirmed · not handed over',
+  on_loan: 'On loan · handover confirmed', returned: 'Returned · ready to share again',
+  rejected: 'Request declined', cancelled: 'Request cancelled'
+};
+const TRANSITION_TOAST = {
+  accept: 'Reservation accepted. Confirm handover when the tool is collected.',
+  reject: 'Request declined. The tool is available again.',
+  cancel: 'Request cancelled.',
+  'hand-over': 'Handover recorded. The tool is now on loan.',
+  return: 'Return confirmed. Ready to help another neighbour.'
+};
+
+/* ------------------------------------------------------------- session only */
+const TOKEN_KEY = 'bnd.token';
+const USER_KEY = 'bnd.user';
+const readStore = k => { try { return localStorage.getItem(k); } catch { return null; } };
+const writeStore = (k, v) => { try { localStorage.setItem(k, v); } catch { /* private mode */ } };
+const dropStore = k => { try { localStorage.removeItem(k); } catch { /* private mode */ } };
+
+let token = readStore(TOKEN_KEY);
+if (token) client.setToken(token);
+
+function freshState() {
+  return { me: null, templates: [], tools: [], tasks: [], loans: [], environment: null, impact: null, names: {} };
+}
+let state = freshState();
+let ui = { filter: 'all', search: '', loanTab: 'borrowed', busy: false, loading: false, message: '' };
 let toastTimer;
-function toast(message){ $('#toast').textContent=message;$('#toast').classList.add('visible');clearTimeout(toastTimer);toastTimer=setTimeout(()=>$('#toast').classList.remove('visible'),4500); }
-function persist(){try{localStorage.setItem(KEY,JSON.stringify(state));}catch{toast('Browser storage is unavailable. Changes will last for this session only.');}}
-function uid(){return globalThis.crypto?.randomUUID?.() || Date.now().toString(36)+Math.random().toString(36).slice(2);}
-function page(){return ['community','task','loans'].includes(location.hash.slice(1))?location.hash.slice(1):'community';}
-function currentTask(){return state.tasks.find(t=>t.creator_id===user&&t.postcode===postcode&&t.status!=='completed');}
-function ensureTask(template='cleanup'){let t=currentTask();if(!t){t=D.createTask({id:uid(),creatorId:user,templateId:template,postcode,placeName:'Neighbourhood green space (sample)'});state.tasks.push(t);persist();}else if(D.ensureRequirements(t).migrated){persist();}return t;}
-function slot(name,placeholder){const raw=window.BND_INTEGRATIONS?.[name];if(!raw)return placeholder;try{const url=new URL(raw,location.href);if(!['http:','https:'].includes(url.protocol))throw Error();return `<iframe class="embed" title="${esc(name)} module" src="${esc(url.href)}" sandbox="allow-scripts allow-forms allow-popups" loading="lazy" referrerpolicy="no-referrer"></iframe>`;}catch{return `<p class="notice">The ${esc(name)} embed URL is invalid.</p>`;}}
+function toast(message) { $('#toast').textContent = message; $('#toast').classList.add('visible'); clearTimeout(toastTimer); toastTimer = setTimeout(() => $('#toast').classList.remove('visible'), 5200); }
+
+/* ---------------------------------------------------------------- helpers */
+function buildNames() {
+  const names = {};
+  const add = (id, name) => { if (id && name) names[id] = name; };
+  if (state.me) add(state.me.id, state.me.display_name);
+  state.tools.forEach(t => add(t.owner.id, t.owner.display_name));
+  state.tasks.forEach(t => add(t.creator.id, t.creator.display_name));
+  state.names = names;
+}
+const nameOf = id => (state.me && state.me.id === id && state.me.display_name) || state.names[id] || 'A neighbour';
+const soft = promise => promise.catch(err => { if (err && err.code === 'UNAUTHENTICATED') throw err; return null; });
+const groupOf = category => (D.CATEGORIES[category] || {}).group || '';
+
+/* ------------------------------------------------------------------- loading */
+async function loadAll() {
+  state.me = await client.me();
+  await refresh();
+}
+async function refresh() {
+  const me = state.me;
+  const cid = me.community.id;
+  const [templates, tools, mine, community, borrower, owner, environment, impact] = await Promise.all([
+    client.taskTemplates(),
+    client.listTools({ community_id: cid, radius_m: 2000, limit: 100 }),
+    client.listTasks({ scope: 'mine', limit: 20 }),
+    soft(client.listTasks({ scope: 'community', community_id: cid, limit: 10 })),
+    client.listLoans({ role: 'borrower', limit: 100 }),
+    client.listLoans({ role: 'owner', limit: 100 }),
+    soft(client.communityEnvironment(cid)),
+    soft(client.communityImpact(cid))
+  ]);
+  // Task summaries carry no requirements, so read the details we render.
+  const ids = [...new Set([...mine, ...(community || [])].map(t => t.id))].slice(0, 12);
+  const details = await Promise.all(ids.map(id => client.getTask(id).catch(err => { if (err && err.code === 'UNAUTHENTICATED') throw err; return null; })));
+
+  state.templates = templates;
+  state.tools = tools;
+  state.tasks = details.filter(Boolean);
+  const seen = new Set();
+  state.loans = [...borrower, ...owner].filter(l => !seen.has(l.id) && seen.add(l.id));
+  state.environment = environment;
+  state.impact = impact;
+  buildNames();
+}
+
+/* ------------------------------------------------------------------ geometry */
 function toolSVG(category){const content={
  spade:'<path d="M81 13v20" stroke="#bd8b56" stroke-width="13"/><path d="M66 8q15-12 30 0v16H66Z" fill="none" stroke="#52684c" stroke-width="7"/><path d="M72 34v34h19V34" fill="#bc8c54"/><path d="M64 64h35l-2 27q-16 26-31 0Z" fill="#9ba693"/><path d="M80 69v33" stroke="#cbd1c1" stroke-width="2"/>',
  gloves:'<g transform="rotate(-16 60 65)"><path d="M29 104V67l-10-16q-2-8 6-8l13 12V26q0-10 8-6v30-36q4-8 10-1v36-31q7-8 10 1v33-25q8-6 10 3v54l-8 20Z" fill="#caad73"/><path d="M28 88h43v22H28Z" fill="#6f805d"/><path d="M37 63h30" stroke="#e1c994" stroke-width="3"/></g><g transform="translate(48 0) rotate(13 60 65)"><path d="M29 104V67l-10-16q-2-8 6-8l13 12V26q0-10 8-6v30-36q4-8 10-1v36-31q7-8 10 1v33-25q8-6 10 3v54l-8 20Z" fill="#dfc08a"/><path d="M28 88h43v22H28Z" fill="#8d9a70"/></g>',
@@ -32,91 +102,430 @@ function toolSVG(category){const content={
  rake:'<path d="M78 11v78" stroke="#ba9165" stroke-width="7"/><path d="m77 84-35 17m35-17 35 17" stroke="#697958" stroke-width="4"/><path d="M37 102h82M39 102v15m13-15v15m13-15v15m13-15v15m13-15v15m13-15v15m13-15v15" stroke="#738366" stroke-width="4"/>',
  picker:'<path d="m94 15-39 82" stroke="#a5ada0" stroke-width="6"/><path d="m83 23 9-18 15 8-9 20" fill="#718753"/><path d="m55 82-17 13 2 15m15-28 1 20-10 12" fill="none" stroke="#526749" stroke-width="7"/>'};return `<svg viewBox="0 0 160 130" aria-hidden="true"><ellipse cx="80" cy="116" rx="44" ry="5" fill="#243827" opacity=".07"/><g transform="rotate(15 80 65)">${content[category]||content.spade}</g></svg>`;}
 function gardenArt(){return `<svg viewBox="0 0 560 385" role="img" aria-label="Illustration of neighbours sharing tools and tending a community garden"><defs><pattern id="grain" width="7" height="7" patternUnits="userSpaceOnUse"><circle cx="1" cy="1" r=".5" fill="#627e55" opacity=".15"/></pattern></defs><path d="M20 370V136Q20 12 144 12h282q116 0 116 126v232Z" fill="#e8eddd"/><circle cx="428" cy="76" r="29" fill="#eee6b5"/><path d="M20 265q91-56 169-18t169-3 184 20v106H20Z" fill="#d4debc"/><path d="M152 236V125l62-47 62 47v117" fill="#efe6ce"/><path d="m138 132 76-60 77 60" fill="none" stroke="#9aa78a" stroke-width="10"/><path d="M184 168h23v29h-23zm48 0h23v29h-23z" fill="#bccab3"/><path d="M219 209h25v34h-25z" fill="#8f9e7d"/><path d="M294 243V152l53-37 52 37v91" fill="#d6ddcc"/><path d="m284 157 63-47 62 47" stroke="#819772" stroke-width="8" fill="none"/><path d="M312 176h22v27h-22zm47 0h22v27h-22z" fill="#f6f3da"/><path d="M91 276V157M74 192q-30-12-23-47 30 2 37 32m4 40q42-4 43-37-34-4-42 18" stroke="#7e9663" stroke-width="7" fill="#a6b984"/><path d="M461 265V157m1 52q-39-10-37-39 31-3 37 25m1-8q32-5 36-30-25-9-35 14" stroke="#799368" stroke-width="6" fill="#95ad78"/><path d="M94 304 254 278l133 49-160 33Z" fill="#ab8663"/><path d="m94 304 133 44 160-30v22l-160 32-133-44Z" fill="#c09a73"/><path d="m107 304 147-16 105 34-132 24Z" fill="#6e7951"/><g stroke="#a6bd77" stroke-width="4"><path d="M154 317v-27m-1 20-13-10m15 4 12-17M196 329v-31m-1 17-14-10m16 2 13-14M245 330v-24m0 11-11-12m12 8 12-16M293 324v-24m0 8 12-13"/></g><g><path d="m334 265-8 56m33-59 12 54" stroke="#455d47" stroke-width="15" stroke-linecap="round"/><path d="m322 316-13 5m64-5 12 3" stroke="#d2ae78" stroke-width="12" stroke-linecap="round"/><path d="M323 214q23-14 40 3l4 56h-48Z" fill="#d1a15f"/><path d="m325 229-24 32-21-6m79-27 19 26" fill="none" stroke="#d1a15f" stroke-width="13" stroke-linecap="round"/><circle cx="342" cy="195" r="17" fill="#d7ab82"/><path d="M326 190q0-24 23-14l11 16-10-3-17-7" fill="#554c37"/><path d="m366 257 13 2 8 19-25 5-4-17Z" fill="#8b9b68"/></g><g><path d="m204 263-16 44m42-43 6 27" stroke="#708671" stroke-width="14" stroke-linecap="round"/><path d="m180 307 14 1m42-17 13 4" stroke="#62543e" stroke-width="10" stroke-linecap="round"/><path d="M207 205q20-6 28 12l6 51-39 1Z" fill="#8b9b71"/><path d="m231 223 25 27 30 5" stroke="#8b9b71" stroke-width="12" fill="none" stroke-linecap="round"/><circle cx="218" cy="188" r="16" fill="#bc865e"/><path d="M201 193q-11-29 18-28 20 0 16 25l-14-16-18 21Z" fill="#444e36"/><path d="m207 229-22 20" stroke="#8b9b71" stroke-width="12" stroke-linecap="round"/></g><g fill="#f4f4e0"><path d="m67 291 4-12 4 12 12 4-12 4-4 12-4-12-12-4Z"/><path d="m409 280 3-8 3 8 8 3-8 3-3 8-3-8-8-3Z"/></g><rect x="20" y="12" width="522" height="358" rx="100" fill="url(#grain)"/><path d="m405 97 8 4 7-5m-285 2 8 3 6-5" fill="none" stroke="#a5b197" stroke-width="2"/></svg>`;}
-function envCard(icon,title,name,source){return `<div class="env-card">${slot(name,`<span class="env-icon">${icon}</span><div><h3>${title}</h3><strong>Awaiting data</strong><span class="status-tag">Not connected</span><p>${source} · regional context</p></div>`)}</div>`;}
-function community(){return `<section class="hero"><div class="hero-copy"><span class="location"><i></i> Small actions. Right on your doorstep.</span><h1>A little sharing.<br>A <em>greener</em><br>neighbourhood.</h1><p>The tools you need might be just next door.<br>Borrow, lend, and make your patch a little better.</p><form class="postcode-form" id="postcode-form"><span aria-hidden="true">⌖</span><input id="postcode" aria-label="Your UK postcode" value="${esc(postcode)}" maxlength="10" required><button>Find my community ↗</button></form><p class="field-message" id="postcode-message">Try EH8 9YL · sample community, approximate area</p></div><div class="hero-art">${gardenArt()}<span class="art-note">Good things grow together.</span><div class="art-label"><div class="mini-avatars"><span>A</span><span>B</span><span>♡</span></div><span>Less buying. More belonging.</span></div></div></section>
-<section><div class="section-heading"><div><h2>A small look at your local patch</h2><p>Environmental context for ${esc(postcode)} — ready for the community data module.</p></div><span class="eyebrow">YOUR POSTCODE, TOGETHER</span></div><div class="environment">${envCard('≋','The air around you','air','Open-Meteo')}${envCard('ϟ','Your regional electricity','electricity','NESO Carbon Intensity')}<div class="env-card"><span class="env-icon">♧</span><div><h3>Room to grow</h3><strong>Find a green space</strong><p>Map connection reserved below · no live places yet</p></div></div></div></section>
-<div class="workspace"><section><div class="section-heading"><div><h2>Good tools. Great neighbours.</h2><p>Something sitting in your shed could start something good.</p></div><button class="btn secondary" data-publish>＋ Lend a tool</button></div><div class="filterbar"><div class="filters">${[['all','All tools'],['garden','Gardening'],['cleanup','Clean-up'],['available','Available']].map(([v,l])=>`<button class="chip ${filter===v?'active':''}" data-filter="${v}">${l}</button>`).join('')}</div><input class="search-input" id="tool-search" value="${esc(search)}" placeholder="Search tools…" aria-label="Search tools"></div><div class="tool-grid" id="tool-grid">${toolCards()}</div></section><aside><div class="action-card"><span class="eyebrow">LET’S DO SOME GOOD</span><span class="flower">✳</span><h2>A greener street<br>starts with us.</h2><p>Pick a small action. Find the tools.<br>Make a difference, together.</p><a class="btn primary" href="#task">Start a community action <span>↗</span></a></div><div class="map-card"><h3>⌖ Your next little project</h3>${slot('map','<div class="map-placeholder"><span class="map-symbol">⌑</span><b>A space for your neighbourhood map</b><small>Green spaces module · ready to connect</small></div>')}<p>Real places will appear when the location module is connected.</p></div></aside></div><div class="bottom-banner"><span>✳</span><div><strong>The more we share, the more we can do.</strong><p>A missing litter picker today. A whole community clean-up tomorrow.</p></div><button class="text-button" data-publish>Be someone’s helpful neighbour ↗</button></div>`;}
-function toolCards(){const tools=state.tools.filter(t=>t.postcode===postcode&&t.name.toLowerCase().includes(search.toLowerCase())&&(filter==='all'||filter==='available'&&t.status==='available'||filter==='garden'&&['spade','gloves','watering','rake'].includes(t.category)||filter==='cleanup'&&['picker','gloves'].includes(t.category)));return tools.length?tools.map(t=>`<article class="tool-card"><div class="tool-art ${esc(t.category)}">${toolSVG(t.category)}<span class="tool-status ${t.status==='available'?'':'busy'}"><i></i>${{available:'Ready to share',reserved:'Reserved',on_loan:'Out helping'}[t.status]}</span></div><div class="tool-body"><h3>${esc(t.name)}</h3><span class="tool-owner">${esc(names[t.owner_id])}’s tool · ${esc(t.postcode)}</span><div class="tool-bottom"><span>Free to borrow</span><button data-borrow="${esc(t.id)}" ${t.status!=='available'||t.owner_id===user?'disabled':''}>${t.owner_id===user?'Your tool':t.status==='available'?'Borrow ↗':'Unavailable'}</button></div></div></article>`).join(''):`<div class="empty"><h3>A little room for sharing.</h3><p>No tools match this search in ${esc(postcode)}.</p><button class="btn secondary" data-publish>Lend the first tool ↗</button></div>`;}
-/* Superseded by web/task-module.js: D.describeTask() / D.taskProgress() decide
-   what "available to request" versus "confirmed" means, and A renders it. */
-/* =============================================================================
- * Member D: action checklist, tool matching and impact panel.
- * All decision logic lives in web/task-module.js; this file only renders it.
- *
- * Rendering never creates state. A task row only appears once somebody picks
- * an action or acts on a slot, so viewing the page cannot invent work for
- * other people in the same postcode.
- * ========================================================================== */
-function taskContext(task){return {tools:state.tools,loans:state.loans,names,viewerId:user,task};}
-function surveyValue(value){return value==='true'?true:value==='false'?false:null;}
-function requirementRow(row){
-  const own=row.loans.slice().sort((a,b)=>b.stageOrder-a.stageOrder)[0];
-  const slotNote=row.slotTotal>1?` · ${row.slot} of ${row.slotTotal}`:'';
-  const locked=row.pending||(row.confirmed&&row.sourceType==='loan');
-  const request=!row.confirmed&&!row.pending&&row.tools.length
-    ?`<button class="btn secondary small" data-borrow="${esc(row.tools[0].toolId)}" data-req="${esc(row.requirementId)}">Request from ${esc(row.tools[0].ownerName)}</button>`
-    :'';
-  const top=row.tools[0];
-  const notes=[];
-  if(top&&top.distanceKm!==null&&top.distanceKm!==undefined)notes.push(`about ${top.distanceKm} km away, straight line`);
-  if(row.state==='available'&&row.tools.length>1)notes.push(`${row.tools.length} neighbours could help`);
-  const note=notes.length?`<small class="muted">${esc(notes.join(' · '))}</small>`:'';
-  const mark=row.confirmed?'✓ ':row.state==='available'?'↗ ':row.pending?'⋯ ':'○ ';
-  return `<div class="requirement state-${row.state}"><div><b>${esc(row.label)}${slotNote}</b><small>${mark}${esc(row.statusText)}</small>${own?`<span class="pill">${esc(own.stageLabel)} · ${esc(own.toolName)}</span>`:''}${note}</div><div class="req-actions">${request}<label><input type="checkbox" data-self="${esc(row.requirementId)}" ${row.sourceType==='self'?'checked':''} ${locked?'disabled':''}> I'll bring my own</label></div></div>`;
+
+function slot(name, placeholder){const raw=window.BND_INTEGRATIONS?.[name];if(!raw)return placeholder;try{const url=new URL(raw,location.href);if(!['http:','https:'].includes(url.protocol))throw Error();return `<iframe class="embed" title="${esc(name)} module" src="${esc(url.href)}" sandbox="allow-scripts allow-forms allow-popups" loading="lazy" referrerpolicy="no-referrer"></iframe>`;}catch{return `<p class="notice">The ${esc(name)} embed URL is invalid.</p>`;}}
+
+/* ------------------------------------------------------------------ routing */
+function page(){return ['community','task','loans'].includes(location.hash.slice(1))?location.hash.slice(1):'community';}
+const postcode = () => (state.me ? state.me.community.postcode : '');
+const myTasks = () => state.tasks.filter(t => state.me && t.creator && t.creator.id === state.me.id);
+const myOpenTask = () => myTasks().filter(t => t.status === 'open')
+  .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))[0] || null;
+function taskContext(task) {
+  return {
+    tools: state.tools, loans: state.loans, names: state.names,
+    viewerId: state.me ? state.me.id : null, task,
+    nearbyPostcodes: state.me ? [state.me.community.postcode, state.me.community.outcode] : []
+  };
 }
-function wantedStrip(board){
-  if(!board.length)return '';
-  return `<div class="wanted-strip"><span class="eyebrow">NEIGHBOURS NEEDED</span><div class="wanted-tags">${board.map(e=>`<span class="chip">${esc(e.label)} · ${e.slots}</span>`).join('')}</div><small>Each of these is a slot a neighbour could fill today. Publishing one tool can unlock an action for everyone.</small></div>`;
+
+/* ------------------------------------------------------------ login / boot */
+function loginView(message) {
+  return `<div class="login-shell"><section class="panel login-panel">
+  <span class="eyebrow">DEMO ACCOUNTS</span>
+  <h2>Sign in to your street.</h2>
+  <p class="muted">Borrow Next Door runs in demo mode against the local API. Choose an account and enter the shared access code (runtime config — never stored in this page).</p>
+  <form id="login-form">
+    <label>Account<select name="user_alias"><option value="alice">Alice · demo account</option><option value="bob">Bob · demo account</option></select></label>
+    <label>Access code<input name="access_code" type="password" autocomplete="off" placeholder="Team DEMO_ACCESS_CODE" required></label>
+    <p class="field-message ${message ? 'error' : ''}" id="login-message">${esc(message || 'Demo accounts only — no real registrations.')}</p>
+    <button class="btn primary" type="submit">Sign in <span>↗</span></button>
+  </form>
+  <p class="notice">The backend defaults to <code>http://127.0.0.1:8000</code> (override with <code>window.BND_API_BASE</code>).</p>
+</section></div>`;
 }
-function impactPanel(report){
-  const cells=report.metrics.map(m=>`<div class="impact-metric ${m.available?'':'pending'}"><strong>${m.available?m.value:'—'}</strong><small>${esc(m.label)}</small><span class="status-tag">${m.available?esc(m.basis):'Not collected yet'}</span></div>`).join('');
-  return `<div class="outcomes">${cells}</div><p class="notice">${esc(report.disclaimer)}</p><p class="muted">Scope: ${esc(report.scope)}. Demo records in this browser only.</p>`;
+function renderLogin(message) {
+  $('#main').innerHTML = loginView(message);
+  document.querySelectorAll('[data-nav]').forEach(el => { el.classList.remove('active'); el.removeAttribute('aria-current'); });
+  const lc = $('#loan-count'); if (lc) lc.textContent = '0';
+  const av = $('#avatar'); if (av) av.textContent = '?';
+  const who = $('#whoami'); if (who) who.textContent = 'Not signed in';
 }
-function taskPage(){
-  const task=currentTask();
-  const ctx=task?taskContext(task):{tools:state.tools,loans:state.loans,names,viewerId:user};
-  const progress=task?D.taskProgress(task,ctx):null;
-  const readiness=task?D.outcomeReadiness(task,ctx):null;
-  const report=D.impactReport(state.tasks,state.loans,{postcode,tools:state.tools,names});
-  const board=D.wantedBoard(state.tasks,ctx);
-  const impact=task?(task.impact||D.emptyImpact()):D.emptyImpact();
-  const survey=impact.would_have_bought_new;
-  const checklist=(task
-    ?`<p class="muted">${progress.confirmed} of ${progress.total} tool slots confirmed. Finding a tool is only the first step.</p><div class="progress-track"><span style="width:${progress.percent}%"></span></div><p class="muted">${esc(progress.nextAction)}</p>${progress.rows.map(requirementRow).join('')}${D.TEMPLATES[task.template_id].consumables.map(c=>`<div class="requirement"><div><b>${esc(c.label)}</b><small>Consumable · bring your own, not part of tool loans</small></div><span>↗</span></div>`).join('')}`
-    :`<p class="muted">Pick an action above. The checklist builds itself from the tools your neighbours already have.</p><div class="progress-track"><span style="width:0%"></span></div>`
-  )+wantedStrip(board);
-  const story=task
-    ?`<p class="muted">Finished your action? Record what you did. A returned tool does not complete an action.</p><label>Your outcome<textarea id="outcome-note" maxlength="500" placeholder="What did you do for your neighbourhood?">${esc(task.outcome_note)}</textarea></label><div class="impact-fields"><label>Bags collected<input id="impact-bags" type="number" min="0" step="1" value="${impact.bags_collected??''}"></label><label>Minutes of neighbour time<input id="impact-minutes" type="number" min="0" step="5" value="${impact.participant_minutes??''}"></label><label>If you could not borrow it, would you have bought new?<select id="impact-bought-new"><option value="" ${survey===null?'selected':''}>Not answered</option><option value="true" ${survey===true?'selected':''}>Yes</option><option value="false" ${survey===false?'selected':''}>No</option></select></label></div>${readiness.warning?`<p class="notice">${esc(readiness.warning)}</p>`:''}<button class="btn primary" id="complete-task">Record completed action ↗</button><p class="muted">Completion is self-reported by the organiser.</p>`
-    :`<p class="muted">Choose an action first. You can record what you did once the action is under way.</p>`;
-  const place=task
-    ?`<label>Where are we helping?<input id="place-name" value="${esc(task.place_name)}" maxlength="100"></label><p class="notice">Sample location. Member C's green-space picker can replace this field. Choose a suitable location before arranging an action.</p>`
-    :`<p class="notice">Nothing is saved until you pick an action. Member C's green-space picker can replace this location field.</p>`;
-  return `<div class="page-heading"><span class="eyebrow">SMALL ACTIONS, SHARED POSSIBILITIES</span><h1>Let's make something <em>good.</em></h1><p>Choose an action and bring the right tools together.</p></div><div class="task-layout"><div><section class="panel"><h2>01 / Pick your little project</h2><div class="template-options">${D.TEMPLATE_LIST.map(t=>`<button class="template-option ${task&&task.template_id===t.id?'active':''}" data-template="${t.id}"><span>${t.icon}</span><strong>${esc(t.name)}</strong><small>${esc(t.blurb)}</small></button>`).join('')}</div>${place}</section><section class="panel"><h2>02 / Bring the tools together</h2>${slot('tasks',checklist)}</section></div><aside><section class="panel"><span class="eyebrow">EVERY STEP COUNTS</span><h2 style="margin-top:15px">03 / Tell the story</h2>${story}</section><section class="panel"><h2>Little actions, adding up.</h2>${slot('outcomes',impactPanel(report))}</section></aside></div>`;
+function loadingView() {
+  return `<div class="empty"><h3>Loading your neighbourhood…</h3><p>Fetching your tools, actions and loans from the Borrow Next Door API.</p></div>`;
 }
-function loansPage(){const loans=state.loans.filter(l=>loanTab==='borrowed'?l.borrower_id===user:state.tools.find(t=>t.id===l.tool_id)?.owner_id===user);return `<div class="page-heading"><span class="eyebrow">SHARED TOOLS. SHARED TRUST.</span><h1>A little give. A little <em>borrow.</em></h1><p>Keep track of the tools making good things happen.</p></div><div class="filters">${[['borrowed','I’m borrowing'],['lent','I’m lending']].map(([v,l])=>`<button class="chip ${loanTab===v?'active':''}" data-loan-tab="${v}">${l}</button>`).join('')}</div><div class="timeline"><span>01 Request sent</span>→<span>02 Reservation accepted</span>→<span>03 Handed over</span>→<span>04 Return confirmed</span></div>${loans.length?loans.map(l=>{const t=state.tools.find(t=>t.id===l.tool_id),owner=t.owner_id===user;let actions='';if(l.status==='pending')actions=owner?`<button class="btn secondary small" data-transition="rejected" data-id="${l.id}">Decline</button><button class="btn primary small" data-transition="accepted" data-id="${l.id}">Accept request</button>`:`<button class="btn secondary small" data-transition="cancelled" data-id="${l.id}">Cancel request</button>`;if(owner&&l.status==='accepted')actions=`<button class="btn primary small" data-transition="on_loan" data-id="${l.id}">Confirm handover</button>`;if(owner&&l.status==='on_loan')actions=`<button class="btn primary small" data-transition="returned" data-id="${l.id}">Confirm returned</button>`;return `<article class="loan-card"><div><h3>${esc(t.name)}</h3><p>${esc(names[l.borrower_id])} borrowing from ${esc(names[t.owner_id])} · ${esc(t.postcode)}</p><span class="pill">${{pending:'Awaiting owner confirmation',accepted:'Reservation confirmed · not handed over',on_loan:'On loan · handover confirmed',returned:'Returned · ready to share again',rejected:'Request declined',cancelled:'Request cancelled'}[l.status]}</span></div><div class="loan-actions">${actions}</div></article>`;}).join(''):`<div class="empty"><h3>${loanTab==='borrowed'?'Your next project starts next door.':'A spare tool can make someone’s day.'}</h3><p>${loanTab==='borrowed'?'Your borrowing requests will appear here.':'Requests for your tools will appear here.'}</p><a class="btn secondary" href="#community">Explore the neighbourhood ↗</a></div>`}<p class="notice">Demo tip: use the identity selector to switch between Alice and Bob. Only the tool’s owner can accept, confirm handover and confirm return. Shared backend integration is still required.</p>`;}
-function render(){const p=page();$('#main').innerHTML=p==='community'?community():p==='task'?taskPage():loansPage();document.querySelectorAll('[data-nav]').forEach(el=>{el.classList.toggle('active',el.dataset.nav===p);if(el.dataset.nav===p)el.setAttribute('aria-current','page');else el.removeAttribute('aria-current');});$('#loan-count').textContent=state.loans.filter(l=>['pending','accepted','on_loan'].includes(l.status)&&(l.borrower_id===user||state.tools.find(t=>t.id===l.tool_id)?.owner_id===user)).length;$('#avatar').textContent=names[user][0];}
-function borrow(id,requirementId){
-  const t=state.tools.find(t=>t.id===id);
-  if(!t||t.status!=='available'||t.owner_id===user){toast('This tool is no longer available to request.');render();return;}
-  const task=ensureTask();
-  const slot=requirementId?task.requirements.find(r=>r.id===requirementId):null;
-  if(!slot){
-    const claimed=state.loans.some(l=>l.task_id===task.id&&D.LOAN_ACTIVE.includes(l.status)&&state.tools.find(x=>x.id===l.tool_id)?.category===t.category);
-    if(claimed){toast('You already have an active request for this tool category.');return;}
+function bootErrorView(message) {
+  return `<div class="login-shell"><section class="panel login-panel"><span class="eyebrow">CONNECTION</span>
+  <h2>We cannot reach the API.</h2><p class="field-message error">${esc(message)}</p>
+  <p class="muted">Start the backend, then try again:</p>
+  <p class="notice"><code>DEMO_ACCESS_CODE=&lt;your team code&gt; backend/.venv/bin/uvicorn app.main:app --port 8000</code></p>
+  <button class="btn primary" id="retry-boot">Try again <span>↗</span></button></section></div>`;
+}
+function setLoginMessage(message) {
+  const el = $('#login-message');
+  if (el && $('#login-form')) { el.textContent = message; el.classList.add('error'); }
+  else renderLogin(message);
+}
+function clearSession() {
+  dropStore(TOKEN_KEY); dropStore(USER_KEY);
+  token = null; client.setToken(null);
+}
+async function boot() {
+  if (!token) { renderLogin(ui.message); return; }
+  ui.loading = true;
+  $('#main').innerHTML = loadingView();
+  try {
+    await loadAll();
+    ui.loading = false; ui.message = '';
+    render();
+  } catch (err) {
+    ui.loading = false;
+    if (err && err.code === 'UNAUTHENTICATED') {
+      clearSession(); state = freshState();
+      renderLogin('Your session expired. Please sign in again.');
+    } else {
+      $('#main').innerHTML = bootErrorView(err && err.message ? err.message : 'Unexpected error.');
+    }
   }
-  const result=D.createLoanRequest(t,task,slot,user,uid,{loans:state.loans,tools:state.tools});
-  if(!result.ok){toast({tool_unavailable:'This tool is no longer available to request.',slot_is_self_provided:'You said you would bring your own for this slot. Untick that first.',slot_already_claimed:'This slot already has a request.'}[result.reason]||'That request could not be made.');persist();render();return;}
-  state.loans.push(result.request);
-  t.status='reserved';
-  persist();render();
-  toast(`Request sent to ${names[t.owner_id]}. Switch identity to respond.`);
 }
-function transition(id,next){const l=state.loans.find(l=>l.id===id);if(!l)return;const t=state.tools.find(t=>t.id===l.tool_id);const allowed={pending:['accepted','rejected','cancelled'],accepted:['on_loan'],on_loan:['returned']};const authorized=next==='cancelled'?l.borrower_id===user:t.owner_id===user;if(!authorized||!allowed[l.status]?.includes(next)){toast('This action is not available. Refresh and try again.');return;}l.status=next;t.status=['rejected','cancelled','returned'].includes(next)?'available':next==='on_loan'?'on_loan':'reserved';if(next==='returned')l.returned_at=new Date().toISOString();persist();render();toast({accepted:'Reservation accepted. Confirm handover when the tool is collected.',rejected:'Request declined. The tool is available again.',cancelled:'Request cancelled.',on_loan:'Handover recorded. The tool is now on loan.',returned:'Return confirmed. Ready to help another neighbour.'}[next]);}
-document.addEventListener('click',e=>{const el=e.target.closest('button');if(!el)return;if(el.matches('[data-close]')){el.closest('dialog').close();return;}if(el.matches('[data-publish]')){$('#publish-owner').textContent=names[user];$('#publish-postcode').textContent=postcode;$('#publish-dialog').showModal();}if(el.dataset.filter){filter=el.dataset.filter;render();}if(el.dataset.borrow)borrow(el.dataset.borrow,el.dataset.req);if(el.dataset.transition)transition(el.dataset.id,el.dataset.transition);if(el.dataset.loanTab){loanTab=el.dataset.loanTab;render();}if(el.dataset.template){const wanted=el.dataset.template;const t=ensureTask(wanted);if(t.template_id===wanted){persist();render();return;}const res=D.setTemplate(t,wanted,{nextId:uid,loans:state.loans});if(!res.ok){toast(res.reason==='active_requests'?'Finish or cancel active tool requests before changing the action.':'That action could not be selected.');return;}persist();render();}if(el.id==='integration-open')$('#integration-dialog').showModal();if(el.id==='complete-task'){const t=currentTask();if(!t)return;const note=$('#outcome-note').value.trim();if(!note){toast('Add a short outcome before recording your action.');$('#outcome-note').focus();return;}const readiness=D.outcomeReadiness(t,taskContext(t));D.applyOutcome(t,{note,bags_collected:$('#impact-bags').value,participant_minutes:$('#impact-minutes').value,would_have_bought_new:surveyValue($('#impact-bought-new').value)});persist();render();toast(readiness.warning||'Action recorded. Returns are counted separately from this report.');}});
-document.addEventListener('input',e=>{if(e.target.id==='tool-search'){search=e.target.value;$('#tool-grid').innerHTML=toolCards();}const editing=currentTask();if(!editing)return;if(e.target.id==='outcome-note'){editing.outcome_note=e.target.value;persist();}if(e.target.id==='impact-bags'){editing.impact.bags_collected=e.target.value===''?null:Number(e.target.value);persist();}if(e.target.id==='impact-minutes'){editing.impact.participant_minutes=e.target.value===''?null:Number(e.target.value);persist();}});
-document.addEventListener('change',e=>{if(e.target.id==='identity'){user=e.target.value;render();}if(e.target.dataset.self){const t=ensureTask(),reqId=e.target.dataset.self;const row=D.describeTask(t,taskContext(t)).find(r=>r.requirementId===reqId);if(row&&row.confirmed&&row.sourceType==='loan'){toast('This slot is covered by a neighbour. Cancel that request first.');e.target.checked=!e.target.checked;return;}const res=D.setSlotSource(t,reqId,e.target.checked?'self':'loan');if(!res.ok){toast('That slot could not be changed.');e.target.checked=!e.target.checked;return;}persist();render();}if(e.target.id==='place-name'){const t=currentTask();if(t){t.place_name=e.target.value.trim()||'Neighbourhood green space (sample)';persist();}}if(e.target.id==='impact-bought-new'){const t=currentTask();if(t){t.impact.would_have_bought_new=surveyValue(e.target.value);persist();render();}}});
-document.addEventListener('submit',e=>{e.preventDefault();if(e.target.id==='publish-form'){const data=new FormData(e.target),name=data.get('name').trim(),description=data.get('description').trim();if(!name||!description){toast('Add a tool name and a short description.');return;}state.tools.unshift({id:uid(),owner_id:user,name,description,category:data.get('category'),status:'available',postcode});persist();$('#publish-dialog').close();e.target.reset();render();toast('Your tool is ready to help a neighbour.');}if(e.target.id==='postcode-form'){const value=$('#postcode').value.toUpperCase().replace(/\s+/g,'');if(!/^(GIR0AA|[A-Z]{1,2}\d[A-Z\d]?\d[A-Z]{2})$/.test(value)){$('#postcode-message').textContent='Please enter a UK postcode, for example EH8 9YL.';$('#postcode-message').classList.add('error');return;}postcode=value.slice(0,-3)+' '+value.slice(-3);render();toast('Demo area updated. Live postcode validation is not connected.');}});
-window.addEventListener('hashchange',()=>{render();window.scrollTo(0,0);});
-window.addEventListener('storage',e=>{if(e.key===KEY&&e.newValue){try{const next=JSON.parse(e.newValue);if(Array.isArray(next.tools)&&Array.isArray(next.loans)&&Array.isArray(next.tasks)){state=next;state.tasks.forEach(t=>D.ensureRequirements(t));render();}}catch{toast('Could not read demo changes from another tab.');}}});
-let migratedOnLoad=false;state.tasks.forEach(t=>{if(D.ensureRequirements(t).migrated)migratedOnLoad=true;});if(migratedOnLoad)persist();
-render();if(storageWarning)toast('Saved demo data could not be read. A fresh session has been started.');
+
+/* --------------------------------------------------------------- busy wrapper */
+function setButtonsDisabled(off) { document.querySelectorAll('button').forEach(b => { b.disabled = off; }); }
+function handleError(err, opts) {
+  // A 401 while signing in means "wrong access code", not "expired session".
+  if (err && err.code === 'UNAUTHENTICATED' && !(opts && opts.ignoreAuth)) {
+    clearSession(); state = freshState();
+    renderLogin('Your session has expired. Please sign in again.');
+    return;
+  }
+  if (opts && typeof opts.onError === 'function') opts.onError(err);
+  toast(err && err.message ? err.message : 'Something went wrong. Please try again.');
+}
+/** Disable everything, run one user intent, surface server errors, then repaint
+ *  only on success — so a failed form keeps what the user typed. */
+async function action(btn, work, opts) {
+  if (ui.busy) return;
+  ui.busy = true;
+  const label = btn ? btn.textContent : null;
+  if (btn) { btn.disabled = true; btn.textContent = 'Working…'; }
+  setButtonsDisabled(true);
+  try {
+    await work();
+  } catch (err) {
+    handleError(err, opts);
+  } finally {
+    ui.busy = false;
+    setButtonsDisabled(false);
+    if (btn) { btn.disabled = false; if (label !== null) btn.textContent = label; }
+  }
+}
+
+/* ------------------------------------------------------------------ community */
+function provider(env, key) {
+  if (!env) return null;
+  if (env.providers && env.providers[key]) return env.providers[key];
+  return env[key] || null;
+}
+function envCard(icon, title, providerKey, source) {
+  const p = provider(state.environment, providerKey);
+  const ok = !!p && (p.status === 'ok' || p.status === 'cached');
+  const detail = ok ? (p.attribution || p.source || 'Connected') : `${source} · awaiting provider`;
+  const inner = `<span class="env-icon">${icon}</span><div><h3>${title}</h3><strong>${ok ? esc(String(p.attribution || 'Connected').slice(0, 30)) : 'Awaiting data'}</strong><span class="status-tag">${ok ? 'Connected' : 'Not connected'}</span><p>${esc(detail)}</p></div>`;
+  return `<div class="env-card">${slot(title === 'The air around you' ? 'air' : 'electricity', inner)}</div>`;
+}
+function toolCards() {
+  const me = state.me;
+  const tools = state.tools.filter(t => t.availability !== 'archived' &&
+    String(t.name || '').toLowerCase().includes(ui.search.toLowerCase()) &&
+    (ui.filter === 'all' || ui.filter === 'available' && t.availability === 'available' ||
+     ui.filter === 'garden' && groupOf(t.category) === 'garden' ||
+     ui.filter === 'cleanup' && groupOf(t.category) === 'cleanup'));
+  if (!tools.length) return `<div class="empty"><h3>A little room for sharing.</h3><p>No tools match this search in ${esc(postcode())}.</p><button class="btn secondary" data-publish>Lend the first tool ↗</button></div>`;
+  return tools.map(t => {
+    const own = me && t.owner.id === me.id;
+    const statusLabel = { available: 'Ready to share', reserved: 'Reserved', on_loan: 'Out helping', archived: 'Archived' }[t.availability] || t.availability;
+    const distance = typeof t.distance_m === 'number' ? `<span class="muted"> · about ${Math.round(t.distance_m)} m away</span>` : '';
+    return `<article class="tool-card"><div class="tool-art ${esc(SVG_KEY[t.category] || 'spade')}">${toolSVG(SVG_KEY[t.category])}<span class="tool-status ${t.availability === 'available' ? '' : 'busy'}"><i></i>${esc(statusLabel)}</span></div><div class="tool-body"><h3>${esc(t.name)}</h3><span class="tool-owner">${esc(t.owner.display_name)}’s tool · ${esc(t.community.postcode)}${distance}</span><div class="tool-bottom"><span>Free to borrow</span><button data-borrow="${esc(t.id)}" ${t.availability !== 'available' || own ? 'disabled' : ''}>${own ? 'Your tool' : t.availability === 'available' ? 'Borrow ↗' : 'Unavailable'}</button></div></div></article>`;
+  }).join('');
+}
+function community() {
+  const me = state.me;
+  const banner = state.impact;
+  return `<section class="hero"><div class="hero-copy"><span class="location"><i></i> Small actions. Right on your doorstep.</span><h1>A little sharing.<br>A <em>greener</em><br>neighbourhood.</h1><p>The tools you need might be just next door.<br>Borrow, lend, and make your patch a little better.</p><form class="postcode-form" id="postcode-form"><span aria-hidden="true">⌖</span><input id="postcode" aria-label="Your UK postcode" value="${esc(postcode())}" maxlength="10" required><button type="submit">Check a postcode ↗</button></form><p class="field-message" id="postcode-message">Your community: ${esc(postcode())} · served by the backend</p></div><div class="hero-art">${gardenArt()}<span class="art-note">Good things grow together.</span><div class="art-label"><div class="mini-avatars"><span>A</span><span>B</span><span>♡</span></span><span>Less buying. More belonging.</span></div></div></section>
+<section><div class="section-heading"><div><h2>A small look at your local patch</h2><p>Environmental context for ${esc(postcode())} — reported per provider by the API.</p></div><span class="eyebrow">YOUR POSTCODE, TOGETHER</span></div><div class="environment">${envCard('≋','The air around you','air_quality','Open-Meteo')}${envCard('ϟ','Your regional electricity','carbon_intensity','NESO Carbon Intensity')}<div class="env-card"><span class="env-icon">♧</span><div><h3>Room to grow</h3><strong>${esc(greenspaceLabel())}</strong><p>Green spaces near ${esc(me.community.outcode)}</p></div></div></div></section>
+<div class="workspace"><section><div class="section-heading"><div><h2>Good tools. Great neighbours.</h2><p>Something sitting in your shed could start something good.</p></div><button class="btn secondary" data-publish>＋ Lend a tool</button></div><div class="filterbar"><div class="filters">${[['all','All tools'],['garden','Gardening'],['cleanup','Clean-up'],['available','Available']].map(([v,l])=>`<button class="chip ${ui.filter===v?'active':''}" data-filter="${v}">${l}</button>`).join('')}</div><input class="search-input" id="tool-search" value="${esc(ui.search)}" placeholder="Search tools…" aria-label="Search tools"></div><div class="tool-grid" id="tool-grid">${toolCards()}</div></section><aside><div class="action-card"><span class="eyebrow">LET’S DO SOME GOOD</span><span class="flower">✳</span><h2>A greener street<br>starts with us.</h2><p>Pick a small action. Find the tools.<br>Make a difference, together.</p><a class="btn primary" href="#task">Start a community action <span>↗</span></a></div><div class="map-card"><h3>⌖ Your next little project</h3>${slot('map','<div class="map-placeholder"><span class="map-symbol">⌑</span><b>A space for your neighbourhood map</b><small>Green spaces module · ready to connect</small></div>')}<p>Real places appear when the location module is connected.</p></div></aside></div><div class="bottom-banner"><span>✳</span><div><strong>The more we share, the more we can do.</strong><p>${banner ? `${banner.active_tools_count} tools shared · ${banner.returned_loans_count} returned loans · ${banner.completed_tasks_count} completed actions in ${esc(me.community.outcode)}.` : 'A missing litter picker today. A whole community clean-up tomorrow.'}</p></div><button class="text-button" data-publish>Be someone’s helpful neighbour ↗</button></div>`;
+}
+function greenspaceLabel() {
+  const p = provider(state.environment, 'greenspace');
+  if (p && (p.status === 'ok' || p.status === 'cached')) return p.attribution || 'Connected';
+  return 'Find a green space';
+}
+
+/* ------------------------------------------------------------------ task page */
+const LOCKED_STATES = ['pending', 'confirmed', 'in_use', 'fulfilled'];
+function requirementRow(row, task) {
+  const own = row.loans.slice().sort((a, b) => b.stageOrder - a.stageOrder)[0];
+  const viewerIsOrganiser = !!(task && state.me && task.creator && task.creator.id === state.me.id);
+  const locked = task.status !== 'open' || LOCKED_STATES.includes(row.state) || !viewerIsOrganiser;
+  const request = row.state === 'match_available' && row.tools.length
+    ? `<button class="btn secondary small" data-borrow="${esc(row.tools[0].toolId)}" data-req="${esc(row.requirementId)}">Request from ${esc(row.tools[0].ownerName)}</button>`
+    : '';
+  const top = row.tools[0];
+  const notes = [];
+  if (top && top.distanceKm !== null && top.distanceKm !== undefined) notes.push(`about ${top.distanceKm} km away, straight line`);
+  if (row.state === 'match_available' && row.tools.length > 1) notes.push(`${row.tools.length} neighbours could help`);
+  const note = notes.length ? `<small class="muted">${esc(notes.join(' · '))}</small>` : '';
+  const mark = row.confirmed ? '✓ ' : row.pending ? '⋯ ' : row.state === 'match_available' ? '↗ ' : '○ ';
+  return `<div class="requirement state-${row.state}"><div><b>${esc(row.label)}</b><small>${mark}${esc(row.statusText)}</small>${own ? `<span class="pill">${esc(own.stageLabel)} · ${esc(own.toolName)}</span>` : ''}${note}</div><div class="req-actions">${request}<label><input type="checkbox" data-self="${esc(row.requirementId)}" ${row.selfSupplied ? 'checked' : ''} ${locked ? 'disabled' : ''}> I'll bring my own</label></div></div>`;
+}
+function wantedStrip(board) {
+  if (!board.length) return '';
+  return `<div class="wanted-strip"><span class="eyebrow">NEIGHBOURS NEEDED</span><div class="wanted-tags">${board.map(e => `<span class="chip">${esc(e.label)} · ${e.slots}</span>`).join('')}</div><small>Each of these is a slot a neighbour could fill today. Publishing one tool can unlock an action for everyone.</small></div>`;
+}
+function impactPanel(report) {
+  const cells = report.metrics.map(m => `<div class="impact-metric ${m.available ? '' : 'pending'}"><strong>${m.available ? m.value : '—'}</strong><small>${esc(m.label)}</small><span class="status-tag">${m.available ? esc(m.basis) : 'Not collected yet'}</span></div>`).join('');
+  const comm = state.impact ? `
+    <div class="impact-metric"><strong>${state.impact.active_tools_count}</strong><small>Tools shared in your community</small><span class="status-tag">backend</span></div>
+    <div class="impact-metric"><strong>${state.impact.returned_loans_count}</strong><small>Loans returned (all neighbours)</small><span class="status-tag">backend</span></div>
+    <div class="impact-metric"><strong>${state.impact.completed_tasks_count}</strong><small>Actions recorded (all neighbours)</small><span class="status-tag">backend</span></div>` : '';
+  const asOf = state.impact ? `<p class="muted">Community counters as of ${esc(state.impact.as_of)}.</p>` : '';
+  return `<div class="outcomes">${cells}${comm}</div><p class="notice">${esc(report.disclaimer)}</p><p class="muted">Scope: ${esc(report.scope)}.</p>${asOf}`;
+}
+function taskPage() {
+  const task = myOpenTask();
+  // The story panel also shows the most recent finished action, so the
+  // numbers the organiser typed are still readable after completion.
+  const storyTask = task || myTasks().filter(t => t.status === 'completed')
+    .sort((a, b) => String(b.completed_at || b.created_at).localeCompare(String(a.completed_at || a.created_at)))[0] || null;
+  const ctx = task ? taskContext(task) : { tools: state.tools, loans: state.loans, names: state.names, viewerId: state.me ? state.me.id : null };
+  const progress = task ? D.taskProgress(task, ctx) : null;
+  const readiness = task ? D.outcomeReadiness(task, ctx) : null;
+  const report = D.impactReport(state.tasks, state.loans, { communityId: state.me.community.id, tools: state.tools, names: state.names });
+  const board = D.wantedBoard(state.tasks, ctx);
+  const recorded = storyTask && storyTask.outcome;
+  const templateButtons = state.templates.length
+    ? state.templates.map(t => {
+        const info = D.TEMPLATES[t.id] || {};
+        return `<button class="template-option ${task && task.template_id === t.id ? 'active' : ''}" data-template="${esc(t.id)}"><span>${info.icon || '✳'}</span><strong>${esc(t.title || info.title || t.id)}</strong><small>${esc(t.description || info.blurb || '')}</small></button>`;
+      }).join('')
+    : `<p class="notice">No action templates came back from the backend.</p>`;
+  const checklist = (task
+    ? `<p class="muted">${progress.confirmed} of ${progress.total} requirements confirmed. Finding a tool is only the first step.</p><div class="progress-track"><span style="width:${progress.percent}%"></span></div><p class="muted">${esc(progress.nextAction)}</p>${progress.rows.map(row => requirementRow(row, task)).join('')}${((D.TEMPLATES[task.template_id] || {}).consumables || []).map(c => `<div class="requirement"><div><b>${esc(c.label)}</b><small>Consumable · bring your own, not part of tool loans</small></div><span>↗</span></div>`).join('')}`
+    : `<p class="muted">Pick an action above. The checklist builds itself from the tools your neighbours already have.</p><div class="progress-track"><span style="width:0%"></span></div>`
+  ) + wantedStrip(board);
+  const story = !storyTask
+    ? `<p class="muted">Choose an action first. You can record what you did once the action is under way.</p>`
+    : storyTask.status === 'completed'
+      ? `<p class="muted">Recorded ${esc(String(storyTask.completed_at || '').slice(0, 16).replace('T', ' '))} UTC.</p><label>Your outcome<textarea id="outcome-note" readonly>${esc(recorded ? recorded.note : '')}</textarea></label><div class="impact-fields"><label>Bags collected<input id="impact-bags" type="number" value="${recorded && recorded.bags_collected !== null ? recorded.bags_collected : ''}" readonly></label><label>Volunteer minutes<input id="impact-minutes" type="number" value="${recorded && recorded.volunteer_minutes !== null ? recorded.volunteer_minutes : ''}" readonly></label></div><p class="notice">Self-reported by the organiser. Returns are counted separately from this report.</p>`
+      : `<p class="muted">Finished your action? Record what you did. A returned tool does not complete an action.</p><label>Your outcome<textarea id="outcome-note" maxlength="500" placeholder="What did you do for your neighbourhood?"></textarea></label><div class="impact-fields"><label>Bags collected<input id="impact-bags" type="number" min="0" step="1" value=""></label><label>Volunteer minutes<input id="impact-minutes" type="number" min="0" step="5" value=""></label></div>${readiness && readiness.warning ? `<p class="notice">${esc(readiness.warning)}</p>` : ''}<button class="btn primary" id="complete-task" ${readiness && !readiness.canSubmit ? 'disabled' : ''}>Record completed action ↗</button><p class="muted">Completion is self-reported by the organiser.</p>`;
+  const place = task
+    ? `<label>Where are we helping?<input id="place-name" value="${esc(task.place.name)}" maxlength="120" readonly></label><p class="notice">Meeting point saved with the action by the backend (within 2 km of ${esc(postcode())}).</p>`
+    : `<p class="notice">Nothing is saved until you pick an action. The meeting point is fixed to your community when the action is created.</p>`;
+  return `<div class="page-heading"><span class="eyebrow">SMALL ACTIONS, SHARED POSSIBILITIES</span><h1>Let's make something <em>good.</em></h1><p>Choose an action and bring the right tools together.</p></div><div class="task-layout"><div><section class="panel"><h2>01 / Pick your little project</h2><div class="template-options">${templateButtons}</div>${place}</section><section class="panel"><h2>02 / Bring the tools together</h2>${slot('tasks', checklist)}</section></div><aside><section class="panel"><span class="eyebrow">EVERY STEP COUNTS</span><h2 style="margin-top:15px">03 / Tell the story</h2>${story}</section><section class="panel"><h2>Little actions, adding up.</h2>${slot('outcomes', impactPanel(report))}</section></aside></div>`;
+}
+
+/* ------------------------------------------------------------------ loans page */
+function loansPage() {
+  const me = state.me;
+  const loans = ui.loanTab === 'borrowed'
+    ? state.loans.filter(l => l.borrower_id === me.id)
+    : state.loans.filter(l => l.owner_id === me.id);
+  const toolOf = id => state.tools.find(t => t.id === id);
+  return `<div class="page-heading"><span class="eyebrow">SHARED TOOLS. SHARED TRUST.</span><h1>A little give. A little <em>borrow.</em></h1><p>Keep track of the tools making good things happen.</p></div><div class="filters">${[['borrowed','I’m borrowing'],['lent','I’m lending']].map(([v,l])=>`<button class="chip ${ui.loanTab===v?'active':''}" data-loan-tab="${v}">${l}</button>`).join('')}</div><div class="timeline"><span>01 Request sent</span>→<span>02 Reservation accepted</span>→<span>03 Handed over</span>→<span>04 Return confirmed</span></div>${loans.length ? loans.map(l => {
+    const isOwner = l.owner_id === me.id;
+    const tool = toolOf(l.tool_id);
+    const postcodeOf = tool ? tool.community.postcode : postcode();
+    const btn = (action, cls, label) => `<button class="btn ${cls} small" data-transition="${action}" data-id="${esc(l.id)}">${label}</button>`;
+    let actions = '';
+    if (l.status === 'pending') actions = isOwner
+      ? btn('reject', 'secondary', 'Decline') + btn('accept', 'primary', 'Accept request')
+      : btn('cancel', 'secondary', 'Cancel request');
+    if (l.status === 'accepted') actions = isOwner
+      ? btn('hand-over', 'primary', 'Confirm handover')
+      : btn('cancel', 'secondary', 'Cancel request');
+    if (l.status === 'on_loan' && isOwner) actions = btn('return', 'primary', 'Confirm returned');
+    return `<article class="loan-card"><div><h3>${esc(l.tool_name)}</h3><p>${esc(nameOf(l.borrower_id))} borrowing from ${esc(nameOf(l.owner_id))} · ${esc(postcodeOf)}</p><span class="pill">${esc(LOAN_PILL[l.status] || l.status)}</span></div><div class="loan-actions">${actions}</div></article>`;
+  }).join('') : `<div class="empty"><h3>${ui.loanTab === 'borrowed' ? 'Your next project starts next door.' : 'A spare tool can make someone’s day.'}</h3><p>${ui.loanTab === 'borrowed' ? 'Your borrowing requests will appear here.' : 'Requests for your tools will appear here.'}</p><a class="btn secondary" href="#community">Explore the neighbourhood ↗</a></div>`}<p class="notice">Only the tool’s owner can accept, hand over and confirm a return. Sign out and switch demo accounts to respond as your neighbour.</p>`;
+}
+
+/* -------------------------------------------------------------------- render */
+function render() {
+  if (!state.me) { renderLogin(ui.message); return; }
+  const p = page();
+  $('#main').innerHTML = ui.loading ? loadingView() : p === 'community' ? community() : p === 'task' ? taskPage() : loansPage();
+  document.querySelectorAll('[data-nav]').forEach(el => {
+    el.classList.toggle('active', el.dataset.nav === p);
+    if (el.dataset.nav === p) el.setAttribute('aria-current', 'page'); else el.removeAttribute('aria-current');
+  });
+  const active = state.loans.filter(l => ['pending', 'accepted', 'on_loan'].includes(l.status) && (l.borrower_id === state.me.id || l.owner_id === state.me.id)).length;
+  const lc = $('#loan-count'); if (lc) lc.textContent = String(active);
+  const av = $('#avatar'); if (av) av.textContent = (state.me.display_name || '?')[0];
+  const who = $('#whoami'); if (who) who.textContent = `${state.me.display_name} · ${state.me.community.outcode}`;
+}
+
+/* ----------------------------------------------------------------- actions */
+async function loginSubmit(form, btn) {
+  const data = new FormData(form);
+  const alias = String(data.get('user_alias') || '').trim();
+  const code = String(data.get('access_code') || '');
+  if (!alias) { setLoginMessage('Choose a demo account.'); return; }
+  if (!code.trim()) { setLoginMessage('Enter the demo access code.'); return; }
+  await action(btn, async () => {
+    const session = await client.login(alias, code);
+    token = session.access_token;
+    writeStore(TOKEN_KEY, token);
+    writeStore(USER_KEY, JSON.stringify({ alias: session.user.alias, display_name: session.user.display_name }));
+    state = freshState();
+    ui.loading = true; ui.message = '';
+    $('#main').innerHTML = loadingView();
+    await loadAll();
+    ui.loading = false;
+    render();
+    toast(`Signed in as ${session.user.display_name}.`);
+  }, { ignoreAuth: true, onError: err => setLoginMessage(err && err.message ? err.message : 'Sign-in failed.') });
+}
+async function publishSubmit(form, btn) {
+  const data = new FormData(form);
+  const name = String(data.get('name') || '').trim();
+  const description = String(data.get('description') || '').trim();
+  const category = String(data.get('category') || 'litter_picker');
+  if (!name || !description) { toast('Add a tool name and a short description.'); return; }
+  await action(btn, async () => {
+    await client.createTool({ name, category, description });
+    await refresh();
+    $('#publish-dialog').close();
+    form.reset();
+    render();
+    toast('Your tool is ready to help a neighbour.');
+  });
+}
+async function postcodeSubmit(form, btn) {
+  const input = $('#postcode');
+  const value = String(input ? input.value : '').trim();
+  if (!value) return;
+  await action(btn, async () => {
+    const community = await client.resolveCommunity(value);
+    const msg = $('#postcode-message');
+    if (msg) { msg.classList.remove('error'); msg.textContent = `${community.postcode} resolves to a community (${community.outcode}). Your demo account stays in ${postcode()}.`; }
+    toast(`That postcode is real: ${community.postcode}.`);
+  }, { onError: err => {
+    const msg = $('#postcode-message');
+    if (msg) { msg.textContent = err.message; msg.classList.add('error'); }
+  } });
+}
+async function chooseTemplate(templateId, btn) {
+  const open = myOpenTask();
+  if (open) {
+    if (open.template_id === templateId) { render(); return; }
+    toast(`You already have an action in progress (“${open.title}”). Record it before starting a different one.`);
+    return;
+  }
+  await action(btn, async () => {
+    const tpl = state.templates.find(t => t.id === templateId);
+    const c = state.me.community;
+    await client.createTask({
+      template_id: templateId,
+      title: tpl ? tpl.title : templateId,
+      place: { name: `Neighbourhood green space · ${c.outcode}`, latitude: c.latitude, longitude: c.longitude, source: 'manual', source_id: null }
+    });
+    await refresh();
+    render();
+    toast('Action started. Now bring the tools together.');
+  });
+}
+async function borrow(toolId, requirementId, btn) {
+  const tool = state.tools.find(t => t.id === toolId);
+  if (!tool || tool.availability !== 'available') { toast('This tool is no longer available to request.'); render(); return; }
+  if (state.me && tool.owner.id === state.me.id) { toast('That is your own tool — a neighbour has to borrow it.'); return; }
+  await action(btn, async () => {
+    const fields = { tool_id: toolId };
+    if (requirementId) fields.requirement_id = String(requirementId).split('#')[0];
+    await client.createLoan(fields);
+    await refresh();
+    render();
+    toast(`Request sent to ${nameOf(tool.owner.id)}. They need to accept it.`);
+  });
+}
+async function transition(loanId, name, btn) {
+  await action(btn, async () => {
+    await client.loanAction(loanId, name);
+    await refresh();
+    render();
+    toast(TRANSITION_TOAST[name] || 'Loan updated.');
+  });
+}
+async function selfSupply(requirementId, checked, input) {
+  const task = myOpenTask();
+  if (!task) return;
+  await action(null, async () => {
+    await client.setSelfSupply(task.id, String(requirementId).split('#')[0], checked);
+    await refresh();
+    render();
+    toast(checked ? 'Marked as “I’ll bring my own”.' : 'Back to borrowing from a neighbour.');
+  }, { onError: () => { if (input) input.checked = !checked; } });
+}
+async function completeTask(btn) {
+  const task = myOpenTask();
+  if (!task) return;
+  const readiness = D.outcomeReadiness(task, taskContext(task));
+  if (!readiness.canSubmit) { toast(readiness.warning || 'This action cannot be recorded yet.'); return; }
+  const noteEl = $('#outcome-note');
+  const note = String(noteEl && noteEl.value || '').trim();
+  if (!note) { toast('Add a short outcome before recording your action.'); if (noteEl && noteEl.focus) noteEl.focus(); return; }
+  const toInt = v => { const s = String(v ?? '').trim(); return /^\d+$/.test(s) ? Number(s) : null; };
+  const body = {
+    outcome_note: note,
+    bags_collected: toInt($('#impact-bags') && $('#impact-bags').value),
+    volunteer_minutes: toInt($('#impact-minutes') && $('#impact-minutes').value)
+  };
+  await action(btn, async () => {
+    await client.completeTask(task.id, body);
+    await refresh();
+    render();
+    toast(readiness.warning || 'Action recorded. Returns are counted separately from this report.');
+  });
+}
+async function signOut(btn) {
+  await action(btn, async () => {
+    let failure = null;
+    try { await client.logout(); } catch (err) { failure = err; }
+    clearSession();
+    state = freshState();
+    ui.message = failure && failure.code === 'NETWORK_ERROR' ? failure.message : '';
+    renderLogin(ui.message);
+    if (!ui.message) toast('Signed out.');
+  });
+}
+
+/* ---------------------------------------------------------------- listeners */
+document.addEventListener('click', e => {
+  const el = e.target.closest('button');
+  if (!el) return;
+  if (el.matches('[data-close]')) { el.closest('dialog').close(); return; }
+  if (el.matches('[data-publish]')) {
+    const owner = $('#publish-owner'), pc = $('#publish-postcode');
+    if (owner) owner.textContent = state.me ? nameOf(state.me.id) : '';
+    if (pc) pc.textContent = postcode();
+    const dlg = $('#publish-dialog'); if (dlg) dlg.showModal();
+    return;
+  }
+  if (el.dataset.filter) { ui.filter = el.dataset.filter; render(); return; }
+  if (el.dataset.borrow) { borrow(el.dataset.borrow, el.dataset.req, el); return; }
+  if (el.dataset.transition) { transition(el.dataset.id, el.dataset.transition, el); return; }
+  if (el.dataset.loanTab) { ui.loanTab = el.dataset.loanTab; render(); return; }
+  if (el.dataset.template) { chooseTemplate(el.dataset.template, el); return; }
+  if (el.id === 'integration-open') { const d = $('#integration-dialog'); if (d) d.showModal(); return; }
+  if (el.id === 'retry-boot') { boot(); return; }
+  if (el.id === 'logout') { signOut(el); return; }
+  if (el.id === 'complete-task') { completeTask(el); return; }
+});
+document.addEventListener('input', e => {
+  if (e.target.id === 'tool-search') {
+    ui.search = e.target.value;
+    const grid = $('#tool-grid');
+    if (grid) grid.innerHTML = toolCards();
+  }
+});
+document.addEventListener('change', e => {
+  if (e.target.dataset && e.target.dataset.self) selfSupply(e.target.dataset.self, e.target.checked, e.target);
+});
+document.addEventListener('submit', e => {
+  e.preventDefault();
+  const btn = e.target.querySelector ? e.target.querySelector('button[type="submit"]') : null;
+  if (e.target.id === 'login-form') return loginSubmit(e.target, btn);
+  if (e.target.id === 'publish-form') return publishSubmit(e.target, btn);
+  if (e.target.id === 'postcode-form') return postcodeSubmit(e.target, btn);
+});
+window.addEventListener('hashchange', () => { render(); window.scrollTo(0, 0); });
+
+boot();

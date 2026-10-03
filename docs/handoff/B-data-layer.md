@@ -1,280 +1,293 @@
-# B · 数据层对接说明
+# B · 后端已交付契约（数据层）
 
-> **一句话：你负责存，我负责算。** 你不需要理解工具匹配规则，只要按下面的字段存取，并让状态转换在服务端真的生效。
+> **一句话：本文档是 B 后端已交付的事实契约，不是任务书。** A / C / D 按本文档对接；与旧交接模型的差异见 §8，逐字段映射见 `docs/handoff/B-backend-contract.md`。
+>
+> 证据：`backend/docs/API_SAMPLES.md`（可复制 curl 全表 + 错误码表）、`backend/docs/TEST_REPORT.md`（156 项测试全绿）。
 
-## 0. TL;DR — 你要做的三件事
+## 1. 通用约定
 
-1. 按 §2 建表 / 改 schema。相比 A 原来的契约只有 **3 处变化**（§3）。
-2. `POST /api/loans` 接收 `requirement_id`，并在**一个事务里**完成「工具可用性检查 → 创建预约 → 工具置为 `reserved`」（§4.1）。
-3. 服务端自己校验身份和状态转换，不信前端（§4.2–4.4）。
+### 1.1 路径与鉴权
 
-**必看**：§7 有一个会让多人流程悄悄算错的坑 —— `GET /api/loans` 不能只返回「当前用户的」请求。
+- 所有业务路径前缀 `/api/v1`，Base URL `http://127.0.0.1:8000`。
+- 鉴权头：`Authorization: Bearer <access_token>`。
+- 登录：`POST /api/v1/demo/sessions`，body `{"user_alias": "alice", "access_code": "<DEMO_ACCESS_CODE>"}`。演示账号 `alice` / `bob` / `carol` 是 **demo account**（非真实注册，不存密码）。访问码由团队运行时配置（环境变量 `DEMO_ACCESS_CODE`，≥16 字符），不写入源码与文档。
+- 除 `GET /health/live`、`GET /health/ready` 与 demo 登录外，所有端点要求 Bearer token；缺失 / 无效 / 过期 / 已注销一律 401 `UNAUTHENTICATED`。
 
-## 1. 责任边界
+### 1.2 成功与错误信封
 
-| | 你（B） | 我（D） |
-|---|---|---|
-| 存什么 | 全部对象的持久化、身份、事务 | 什么都不存 |
-| 算什么 | 无业务规则，只做校验 | 匹配、缺口、槽位状态、成果口径 |
-| 状态转换 | 服务端执行并校验 | 只在前端提示，不作为安全边界 |
-| 交付物 | `POST/PATCH` 接口 + DB | `web/task-module.js`（纯函数） |
+- 成功：`{"data": <对象|数组>, "meta": {"request_id": "...", ...}}`；列表的 `meta` 另含 `limit` / `offset` / `total`（默认 limit=20，范围 1–100）。
+- 错误：`{"error": {"code": "...", "message": "...", "details": {}}, "meta": {"request_id": "..."}}`。错误码全表见 `backend/docs/API_SAMPLES.md` 附录 B。
 
-## 2. 必须持久化的对象
+### 1.3 幂等（Idempotency-Key）
 
-### Tool
+- 除登录 / 注销外的所有业务写请求（POST/PUT）要求 `Idempotency-Key` 头，格式为 UUID。
+- **一次用户意图生成一个 UUID；网络重试复用同一个 key。** 同 actor/key 相同请求返回原结果（响应头 `Idempotency-Replayed: true`）；同 key 不同意图返回 409 `IDEMPOTENCY_KEY_REUSED`。
+- 缺失或格式不符：400 `IDEMPOTENCY_KEY_REQUIRED` / `IDEMPOTENCY_KEY_INVALID`。
+
+### 1.4 时间与距离
+
+- 所有时间字段为 ISO 8601 UTC（`Z` 结尾），如 `2026-10-03T10:05:00Z`。
+- `distance_m` 是**邮编中心点直线距离估计**（Haversine），不是住所距离或步行距离；无参照社区时为 `null`，不填 0 冒充已计算。
+
+## 2. 冻结枚举（不可改名）
+
+### 2.1 工具类别（4 个）
+
+`litter_picker`、`reusable_gloves`、`watering_can`、`hand_trowel`。
+
+### 2.2 任务模板（2 个）
+
+| 模板 id | 需求 |
+|---|---|
+| `park_cleanup` | `litter_picker` ×1、`reusable_gloves` ×1 |
+| `flowerbed_care` | `watering_can` ×1、`hand_trowel` ×1 |
+
+模板与需求由服务端冻结，客户端创建任务时不能传需求。`GET /api/v1/task-templates` 返回模板清单。
+
+### 2.3 状态集合
+
+| 对象 | 取值 |
+|---|---|
+| Tool `availability`（计算字段） | `available` / `reserved` / `on_loan` / `archived` |
+| Task `status` | `open` / `completed` |
+| Requirement `state`（服务端派生） | `self_supplied` / `pending` / `confirmed` / `in_use` / `fulfilled` / `match_available` / `missing` |
+| Loan `status` | `pending` / `accepted` / `on_loan` / `returned` / `rejected` / `cancelled` |
+
+## 3. 对象字段表
+
+### 3.1 Tool
 
 ```json
 {
-  "id": "tool_1",
-  "owner_id": "bob",
-  "name": "The trusty watering can",
-  "category": "watering",
-  "description": "Green 5 litre can.",
-  "status": "available",
-  "postcode": "EH8 9YL",
-  "latitude": 55.947687,
-  "longitude": -3.187349
+  "id": "t1111111-1111-4111-8111-111111111111",
+  "name": "Galvanised watering can",
+  "category": "watering_can",
+  "description": "5 litre watering can, good for flowerbeds.",
+  "owner": {"id": "u1111111-1111-4111-8111-111111111111", "display_name": "Alice"},
+  "community": {
+    "id": "c1111111-1111-4111-8111-111111111111", "postcode": "EH8 9AB", "outcode": "EH8",
+    "latitude": 55.944703, "longitude": -3.187417, "country": "Scotland",
+    "source": "fixture", "source_kind": "fixture", "fetched_at": "2026-10-03T09:00:00Z"
+  },
+  "availability": "available",
+  "is_archived": false,
+  "distance_m": 0.0,
+  "created_at": "2026-10-03T09:00:00Z",
+  "updated_at": "2026-10-03T09:00:00Z"
 }
 ```
 
-`category` 只能是：`picker` / `gloves` / `spade` / `watering` / `rake`。
-`status` 只能是：`available` / `reserved` / `on_loan`。
+- **没有存储的 `status` 字段。** `availability` 是服务端计算字段：`is_archived` → `archived`；存在 `on_loan` 借用 → `on_loan`；存在 `pending` / `accepted` 借用 → `reserved`；否则 `available`。
+- `owner` / `community` 由服务端从当前会话确定，创建时客户端不能传。
+- `distance_m` 相对请求的 `community_id` 中心点计算；无参照社区时为 `null`。
+- 归档：`POST /api/v1/tools/{id}/archive`（仅所有者；存在有效借用时 409 `ACTIVE_LOAN_EXISTS`）。归档后 `availability: "archived"`，历史可读但不可申请。
 
-`latitude` / `longitude` 是**可选**的，由 C 提供（出借者社区中心点）。缺了只是不显示距离，不会报错。
-
-### Task
+### 3.2 Task
 
 ```json
 {
-  "id": "task_1",
-  "creator_id": "alice",
-  "template_id": "street_trees",
-  "postcode": "EH8 9YL",
-  "place_name": "Meadow by the path",
-  "latitude": 55.947687,
-  "longitude": -3.187349,
-  "status": "planning",
-  "outcome_note": "",
-  "impact": {
-    "bags_collected": null,
-    "participant_minutes": null,
-    "would_have_bought_new": null
-  },
-  "requirements": [ /* 见下 */ ],
-  "created_at": "2026-10-03T09:00:00Z",
+  "id": "55555555-5555-4555-8555-555555555555",
+  "title": "Saturday neighbourhood clean-up",
+  "creator": {"id": "u1111111-1111-4111-8111-111111111111", "display_name": "Alice"},
+  "community_id": "c1111111-1111-4111-8111-111111111111",
+  "template_id": "park_cleanup",
+  "place": {"name": "Demo clean-up meeting point", "latitude": 55.944703,
+            "longitude": -3.187417, "source": "manual", "source_id": null},
+  "status": "open",
+  "requirements": [ /* 见 3.3 */ ],
+  "coordination_ready": false,
+  "completion_eligible": false,
+  "outcome": null,
+  "created_at": "2026-10-03T10:00:00Z",
   "completed_at": null
 }
 ```
 
-`template_id` 只能是：`cleanup` / `garden` / `street_trees` / `spring_bulbs`（模板和需求由我定义，你只要能存字符串）。
-`status` 只能是：`planning` / `completed`。
+- `status` 只有 `open` / `completed` 两态（旧模型的 `planning` 已废弃，见 §8）。
+- `place`：`{name, latitude, longitude, source, source_id}`，`source` ∈ `osm` / `manual` / `fixture`。place 坐标距用户社区中心必须 ≤2000m，否则 422 `OUT_OF_RANGE`。
+- `requirements` 由服务端从模板生成，创建任务时客户端不能传。
+- `coordination_ready` / `completion_eligible` 为服务端派生布尔：
+  - `coordination_ready`：全部需求 state ∈ {`self_supplied`, `confirmed`, `in_use`, `fulfilled`}。
+  - `completion_eligible`：全部需求 state ∈ {`self_supplied`, `in_use`, `fulfilled`}——注意 `confirmed` 不算：预约已接受但尚未交接，任务尚不可完成。
+- `outcome`：完成前为 `null`；完成后为 `{"note": "...", "bags_collected": 4, "volunteer_minutes": 90, "verification": "self_reported"}`。**没有 `would_have_bought_new` 字段**（旧模型问卷字段已移除）。`bags_collected` / `volunteer_minutes` 为创建者自报，未填为 `null`——**`null` ≠ `0`**：`null` 表示未采集（界面显示 "Not collected yet"），`0` 表示填了 0。
 
-`impact` 三个字段都是**用户自报**，可以为 `null`（= 没填）。**`null` 和 `0` 意义完全不同**：`null` 表示没采集，面板显示 "Not collected yet"；`0` 表示填了 0。
-
-### TaskRequirement
+### 3.3 TaskRequirement
 
 ```json
 {
-  "id": "req_1",
-  "task_id": "task_1",
-  "category": "watering",
+  "id": "66666666-6666-4666-8666-666666666666",
+  "category": "litter_picker",
   "quantity": 1,
-  "slot": 1,
-  "slot_total": 2,
-  "source_type": "loan",
-  "loan_request_id": "loan_1"
+  "self_supplied": false,
+  "state": "missing",
+  "active_loan_id": null,
+  "candidate_tool_ids": []
 }
 ```
 
-- 一个槽位 = 一件实物。`street_trees` 要两个洒水壶 → 在同一个 task 下有两行 `category: "watering"`，`slot` 分别是 1 和 2，`slot_total` 都是 2。
-- `quantity` 恒为 `1`（展开在 `buildRequirements()` 里做了），保留该字段是为了跟规划文档的字段表对齐。
-- `source_type`：`loan`（要向邻居借）或 `self`（参与者自备）。用户勾选「I'll bring my own」时会从 `loan` 翻成 `self`。
-- `loan_request_id`：**反范式指针**，跟 `LoanRequest.requirement_id` 同时写入。见 §4.2。
+- 每类需求一行，`quantity` 恒为 1（模板展开在服务端完成）。
+- `self_supplied`：bool。创建者通过 `PUT /api/v1/tasks/{task_id}/requirements/{requirement_id}/self-supply`（body `{"self_supplied": true|false}`）勾选 / 取消自备。
+- `state`：服务端派生（§4.3），客户端不要自行计算。
+- `active_loan_id`：该需求当前有效借用（`pending` / `accepted` / `on_loan`）的 id；仅对任务创建者与借用双方可见，无关用户为 `null`。
+- `candidate_tool_ids`：2000m 内可申请的可用工具 id，**最多 5 个**，按距离 / 时间稳定排序。
 
-### LoanRequest
+### 3.4 Loan
 
 ```json
 {
-  "id": "loan_1",
-  "tool_id": "tool_1",
-  "borrower_id": "alice",
-  "task_id": "task_1",
-  "requirement_id": "req_1",
+  "id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+  "tool_id": "t3333333-3333-4333-8333-333333333333",
+  "tool_name": "Reusable gardening gloves",
+  "owner_id": "u2222222-2222-4222-8222-222222222222",
+  "borrower_id": "u1111111-1111-4111-8111-111111111111",
+  "requirement_id": "77777777-7777-4777-8777-777777777777",
+  "task_id": "55555555-5555-4555-8555-555555555555",
   "status": "pending",
-  "created_at": "2026-10-03T09:05:00Z",
-  "returned_at": null
+  "note": "For our neighbourhood clean-up.",
+  "created_at": "2026-10-03T10:10:00Z",
+  "updated_at": "2026-10-03T10:10:00Z",
+  "accepted_at": null,
+  "handed_over_at": null,
+  "returned_at": null,
+  "rejected_at": null,
+  "cancelled_at": null
 }
 ```
 
-`status` 只能是：`pending` / `accepted` / `on_loan` / `returned` / `rejected` / `cancelled`。
+- `requirement_id` 关联任务需求；允许 `null`（独立借用，不改变任务需求状态）。
+- `owner_id` / `borrower_id` 由服务端身份决定，创建时客户端不能传。
+- 各时间戳在对应动作发生时写入；未发生为 `null`。
 
-## 3. 相比 A 原契约的 3 处变化
+## 4. 状态机与派生规则
 
-| 变化 | 原来 | 现在 | 为什么 |
-|---|---|---|---|
-| Task 的子结构 | `self: ["gloves"]`（类别数组） | `requirements: [TaskRequirement]` | 规划文档 §6 就要求正式 `TaskRequirement`；而且只有对象才能表达数量、槽位和「已落实」的依据 |
-| LoanRequest | `{id, tool_id, borrower_id, task_id, status, created_at, returned_at}` | 多一个 `requirement_id` | 申请人选的是**哪个槽位**。只按类别匹配会让「两个洒水壶」无法区分，也会让两个并发申请撞在同一个槽位 |
-| Task | 无成果字段 | 多一个 `impact: {bags_collected, participant_minutes, would_have_bought_new}` | 简报要求「清理袋数、参与时长」必须标注为自报，且必须和叙述性 `outcome_note` 分开 |
-
-### 迁移
-
-前端已经能自己处理老数据：加载时 `D.ensureRequirements(task)` 会把 `self: [...]` 转成 `requirements[]`（对应类别翻成 `source_type: "self"`），补上 `impact`，写回一次，之后不再重复。
-
-所以：
-
-- **如果你从 DB 读出来的还是老格式**，可以直接把它原样交给前端，前端会转。但**你写回去的时候请写新格式**，否则每次加载都要转一遍。
-- **如果你在 DB 层做迁移**，就是：给每个 task 按 `template_id` 生成 requirements，把 `self` 里列出的类别对应的槽位 `source_type` 置为 `self`，删掉 `self` 字段。
-
-## 4. 服务端必须自己保证的 4 条规则
-
-前端已经会拦，但**前端拦不住并发，也拦不住直接调接口的人**。这 4 条是 Quality 那 10 分的检查点。
-
-### 4.1 原子性：一个工具不能同时被两人预约成功
+### 4.1 Loan 状态机
 
 ```
-POST /api/loans { tool_id, task_id, requirement_id }
+pending ──accept──> accepted ──hand-over──> on_loan ──return──> returned
+   │                   │
+   ├──reject──> rejected
+   └──cancel──> cancelled        accepted ──cancel──> cancelled
 ```
 
-必须在一个事务 / 一条带条件的 UPDATE 里完成：
+| 动作端点 | 合法前置 | 权限 |
+|---|---|---|
+| `POST /api/v1/loans/{id}/accept` | `pending` | 仅工具所有者 |
+| `POST /api/v1/loans/{id}/reject` | `pending` | 仅工具所有者 |
+| `POST /api/v1/loans/{id}/cancel` | `pending` / `accepted` | 借用双方 |
+| `POST /api/v1/loans/{id}/hand-over` | `accepted` | 仅工具所有者 |
+| `POST /api/v1/loans/{id}/return` | `on_loan` | 仅工具所有者 |
+
+- 非法转换：409 `INVALID_TRANSITION`。
+- 工具 `availability` 随借用状态联动：申请时 `available → reserved`；`accepted` 保持 `reserved`；`hand-over` 后 `on_loan`；`reject` / `cancel` / `return` 释放回 `available`。
+- **`accepted` 只代表预约得到确认，`on_loan` 才是真的交出去了**——两个事实分开记录，界面不得合并成一句话。
+
+### 4.2 Task 状态机
 
 ```
-BEGIN
-  tool = SELECT ... FOR UPDATE WHERE id = tool_id
-  IF tool.status != 'available' THEN ROLLBACK, 409 tool_unavailable
-  IF 该工具已有 status IN ('pending','accepted','on_loan') 的请求 THEN ROLLBACK, 409 already_requested
-  INSERT loan (status='pending', requirement_id=...)
-  UPDATE tool SET status='reserved'
-COMMIT
+open ──POST /api/v1/tasks/{id}/complete──> completed
 ```
 
-返回 409 时前端会提示「This tool is no longer available to request.」——所以**请用 4xx，不要返回 200 + 错误文案**，否则前端会把这次失败当成成功。
+- 完成条件：`completion_eligible` 为 true（全部需求已落实：自备 / 已交接 / 已归还）。存在 `pending` / `accepted` 需求或需求未满足时 409 `TASK_NOT_READY`；重复完成 409 `TASK_ALREADY_COMPLETED`。
+- 完成请求体：`{"outcome_note": "...", "bags_collected": 4, "volunteer_minutes": 90}`；服务端写入 `outcome` 并置 `verification: "self_reported"`。
+- 归还工具**不会**自动完成任务——任务完成必须由创建者单独提交。
 
-### 4.2 一个槽位只有一个有效请求
+### 4.3 Requirement state 派生（服务端权威）
 
-- `requirement_id` 指向的槽位，不能有第二条 `status IN ('pending','accepted','on_loan')` 的请求。
-- 同时把 `TaskRequirement.loan_request_id` 写成这个请求的 id（申请人创建时就写）。
-- **`returned` / `rejected` / `cancelled` 时不要依赖这个指针来挡后续申请。** 前端已经做了：`D.slotIsClaimed()` 只把 `pending / accepted / on_loan` 当作占用，指针指向已结束的请求时不拦截。
-
-  这一点很重要，因为**同一件工具被借第二次是简报里要计数的指标**（`completed_loans`）。如果按「指针非空就算占用」来挡，归还过的槽位就会永久锁死，用户看到「可申请」按钮但点了报错。见单测 `a finished request does not lock its slot forever` 和端到端测试 `the same tool can be borrowed again after it comes back`。
-
-  你可以顺手在 `rejected` / `cancelled` 时清空指针（`returned` 时**保留**，因为需要历史），但**不要把它作为唯一防线**——服务端仍须按上一段的「有效请求」定义来校验。
-- **我读的时候以 `LoanRequest.requirement_id` 为准**，`loan_request_id` 只作为历史请求的兜底。所以两个都写最稳，只写 `requirement_id` 也能工作。
-
-### 4.3 谁能改哪个状态
-
-| 转换 | 谁有权限 |
+| state | 判定 |
 |---|---|
-| `pending → accepted` | 工具出借者 |
-| `pending → rejected` | 工具出借者 |
-| `pending → cancelled` | 申请人 |
-| `accepted → on_loan` | 工具出借者（实际交接后） |
-| `on_loan → returned` | 工具出借者 |
+| `pending` | 存在 `pending` 借用 |
+| `confirmed` | 存在 `accepted` 借用 |
+| `in_use` | 存在 `on_loan` 借用 |
+| `fulfilled` | 无有效借用，但存在已交接后归还（`returned` 且 `handed_over_at` 非空）的历史 |
+| `self_supplied` | 无借用历史且 `self_supplied: true` |
+| `match_available` | 以上都不成立，但 2000m 内有可申请的可用工具 |
+| `missing` | 以上都不成立 |
 
-规则：**`accepted` 只代表预约得到确认，`on_loan` 才是真的交出去了。** 这两个必须分开记，简报明确要求「预约得到确认」和「实际借出」是两件事，演示脚本要在两个窗口里分别展示。
+## 5. 权限与可见性
 
-工具状态随请求状态联动：
+- **他人私有资源 404**：非借用双方查询他人借用（详情 / 事件 / 动作）一律 404 `NOT_FOUND`——不可见语义，不泄露存在性。
+- **越权 403**：对可见资源执行不允许的动作（借自己的工具 403 `SELF_BORROW_FORBIDDEN`；非所有者接受 403 `FORBIDDEN`；非创建者改自备 403 `FORBIDDEN`）。
+- 任务列表：`GET /api/v1/tasks?scope=mine`（默认）返回本人任务；`scope=community` 必填 `community_id`，返回社区公开摘要（不含他人借用详情）。
+- 借用列表：`GET /api/v1/loans?role=borrower`（默认，本人借入）或 `role=owner`（本人拥有工具的借出）；`status` 可过滤。
 
-```
-申请时          available → reserved
-accepted        reserved  → reserved   （不动）
-on_loan         reserved  → on_loan
-rejected/cancelled/returned  →  available
-```
+## 6. 并发与唯一性
 
-`returned` 时必须写 `returned_at`（ISO 8601 UTC）。
+数据库迁移含部分唯一索引，保证同一工具 / 同一需求最多一条有效借用：
 
-### 4.4 不要信前端
+| 冲突 | 错误码 |
+|---|---|
+| 工具已被预留或借出 | 409 `TOOL_UNAVAILABLE` |
+| 需求被另一借用占用 | 409 `REQUIREMENT_OCCUPIED` |
+| 工具已归档 | 409 `TOOL_ARCHIVED` |
+| 归档时存在有效借用 | 409 `ACTIVE_LOAN_EXISTS` |
+| 需求存在有效借用或有借出历史时改自备 | 409 `REQUIREMENT_LOCKED` |
+| 需求已自备再改回 | 409 `REQUIREMENT_ALREADY_FULFILLED` |
 
-- `owner_id` / `borrower_id` 由服务端身份决定，**不要从请求体里读**。
-- 非法转换返回 4xx，不要静默忽略。
-- 前端 `transition()` 里的权限判断只是 UX（防止按钮点了没反应），不是安全边界。
+并发证据：`backend/docs/TEST_REPORT.md` §3.2（`tests/test_loans_concurrency.py` 3 项全绿）。
 
-## 5. 序列化约定
+## 7. 端点全表
 
-| 项 | 约定 | 原因 |
+| 方法 | 路径 | 说明 |
 |---|---|---|
-| `postcode` | **存归一化后的值**：去空格、转大写、补成 `EH8 9YL` 形式 | 我在内存里会归一化，但存两种写法会让「同邮编」匹配漏掉邻居 |
-| 时间戳 | ISO 8601 UTC 字符串（`2026-10-03T09:05:00Z`） | 我用字符串比较做「最旧优先」的确定性槽位分配，格式不一致会排错 |
-| 数字 | 用 JSON number，不要用字符串 | `bags_collected: "3"` 我会转成 3，但 `participant_minutes: "90 min"` 会变成 `null` |
-| 没填的值 | 用 `null`，**不要用 `""` 或 `0`** | `""` 会被当成「没填」，`0` 会被当成「填了 0」。这两个在成果面板上显示完全不同 |
-| id | 字符串 | 我不关心格式 |
+| POST | `/api/v1/demo/sessions` | 登录（公开） |
+| POST | `/api/v1/sessions/logout` | 注销 |
+| GET | `/api/v1/me` | 当前用户 |
+| GET | `/api/v1/task-templates` | 模板清单（2 个冻结模板） |
+| GET | `/api/v1/tasks?scope=mine\|community[&community_id=]` | 任务列表 |
+| POST | `/api/v1/tasks` | 创建任务（`template_id`, `title`, `place`） |
+| GET | `/api/v1/tasks/{id}` | 任务详情（含需求派生状态） |
+| PUT | `/api/v1/tasks/{id}/requirements/{rid}/self-supply` | 标记 / 取消自备（body `{"self_supplied": bool}`） |
+| POST | `/api/v1/tasks/{id}/complete` | 完成任务（`outcome_note`, `bags_collected`, `volunteer_minutes`） |
+| GET | `/api/v1/tools?community_id=&radius_m=` | 工具列表（`radius_m` 允许 100–2000） |
+| POST | `/api/v1/tools` | 发布工具（`name`, `category`, `description`） |
+| GET | `/api/v1/tools/{id}` | 工具详情 |
+| POST | `/api/v1/tools/{id}/archive` | 归档（仅所有者） |
+| GET | `/api/v1/loans?role=borrower\|owner[&status=]` | 借用列表 |
+| POST | `/api/v1/loans` | 申请借用（`tool_id`, `requirement_id`, `note?`） |
+| GET | `/api/v1/loans/{id}` | 借用详情 |
+| GET | `/api/v1/loans/{id}/events` | 借用事件 |
+| POST | `/api/v1/loans/{id}/accept` | 接受（所有者） |
+| POST | `/api/v1/loans/{id}/reject` | 拒绝（所有者） |
+| POST | `/api/v1/loans/{id}/cancel` | 取消（双方，`pending` / `accepted`） |
+| POST | `/api/v1/loans/{id}/hand-over` | 交接（所有者） |
+| POST | `/api/v1/loans/{id}/return` | 确认归还（所有者） |
+| GET | `/api/v1/communities/resolve?postcode=` | 邮编解析 |
+| GET | `/api/v1/communities/{id}/environment` | 环境卡（各 provider 独立 envelope） |
+| GET | `/api/v1/communities/{id}/impact` | 社区 impact |
+| GET | `/health/live`、`/health/ready` | 健康检查（公开） |
 
-## 6. 接口清单
+所有写请求（除登录 / 注销）带 `Idempotency-Key`。完整 curl 样例见 `backend/docs/API_SAMPLES.md`。
 
-沿用 A 在 README 里定的路径。★ 是相对于原表新增的字段。
+## 8. 与旧交接模型的差异
 
-| 方法 | 路径 | 关键字段 | 谁用 |
-|---|---|---|---|
-| GET | `/api/tools?postcode=…` | 全部状态，不要只返回 available | A 的社区页 + 我的匹配 |
-| POST | `/api/tools` | name, category, description, postcode；owner 由服务端定 | A |
-| GET | `/api/loans` | 当前用户借入与借出 | A 的借入借出页 |
-| ★ GET | `/api/tasks/:id/loans` | **该任务的全部请求**（所有人） | 我 — 见 §7 |
-| POST | `/api/loans` | tool_id, task_id, ★ requirement_id | A 的按钮 + 我 |
-| PATCH | `/api/loans/:id` | status；校验身份与合法转换 | A |
-| GET | `/api/tasks?postcode=…` | 该邮编的全部任务 | 我的缺口板与成果面板 — 见 §7 |
-| POST | `/api/tasks` | template_id, postcode, place_name, lat/lng, requirements[] | 我（A 代为提交） |
-| PATCH | `/api/tasks/:id` | place_name / requirements（自备）/ outcome_note / impact / status | 我 |
+旧模型（D 早期交接文档中的词汇）与 B 已交付契约的逐字段映射见 `docs/handoff/B-backend-contract.md`。要点：
 
-## 7. ⚠️ 必须看：别把 loans 和 tasks 做成「只返回我的」
-
-这是最容易悄悄算错的地方。
-
-`web/app.js` 现在这样组装上下文：
-
-```js
-function taskContext(task){
-  return { tools: state.tools, loans: state.loans, names, viewerId: user, task };
-}
-D.wantedBoard(state.tasks, ctx);
-D.impactReport(state.tasks, state.loans, { postcode, tools: state.tools, names });
-```
-
-它传的是**整个邮编下的全量数据**。我的函数依赖这一点：
-
-| 我需要的 | 用来做什么 | 如果只给「我的」会怎样 |
+| 旧模型 | B 契约 | 说明 |
 |---|---|---|
-| 该邮编**全部**工具（含 reserved / on_loan） | `matchTools()` 判断「可申请」 | 会向用户推荐已经被别人预约的工具 |
-| 该任务**全部**借用请求（所有人） | `claimLoans()` 判断槽位是否已落实 | 槽位明明被 Bob 预约了，Alice 的页面还是显示「可申请」/「还缺工具」——**正是简报点名要区分的场景会算错** |
-| 该邮编**全部**任务 | `wantedBoard()` 缺口板；`actions_with_tools_confirmed` 指标 | 缺口板变成「我一个人的缺口」，那句「邻居越多越有用」的演示就不成立了 |
+| 类别 `picker` / `gloves` / `spade` / `watering` / `rake` | `litter_picker` / `reusable_gloves` / `watering_can` / `hand_trowel` | 4 个冻结 slug |
+| 模板 `cleanup` / `garden` / `street_trees` / `spring_bulbs` | `park_cleanup` / `flowerbed_care` | 2 个冻结模板 |
+| Task `status: planning` | `status: open` | 两态：`open` / `completed` |
+| `impact: {bags_collected, participant_minutes, would_have_bought_new}` | `outcome: {note, bags_collected, volunteer_minutes, verification}` | 问卷字段 `would_have_bought_new` 已移除；`participant_minutes` 改名 `volunteer_minutes` |
+| `TaskRequirement.slot` / `slot_total` | 单需求行（每类一行，无槽位编号） | 旧「一个槽位 = 一件实物」的编号机制删除 |
+| `TaskRequirement.source_type: loan\|self` | `self_supplied: bool` | 自备是布尔标记 |
+| `TaskRequirement.loan_request_id` 反范式指针 | `active_loan_id`（派生，权限内可见） | 不再双写指针 |
+| Tool 存储 `status` | 计算字段 `availability`（+ `is_archived`） | 状态由借用与归档派生 |
+| `GET /api/tools`、`PATCH /api/loans/{id}` | `GET /api/v1/tools?community_id=`、动作端点 `POST /api/v1/loans/{id}/accept\|reject\|cancel\|hand-over\|return` | 路径前缀 `/api/v1`；状态变更走专用动作端点 |
 
-### 两个选择，任选一个
+## 9. 「已落实 vs 可申请」的权威答案（旧 §7 精神的解法）
 
-**方案 1（推荐，改动小）**：新增 `GET /api/tasks/:id/loans`，返回该任务的全部请求。字段只给渲染需要的、不含隐私的部分：
+旧交接文档 §7 担心「只返回我的数据」会让多人流程悄悄算错。B 契约的解法：
 
-```json
-[{ "id":"loan_1", "tool_id":"tool_1", "borrower_id":"alice",
-   "task_id":"task_1", "requirement_id":"req_1",
-   "status":"accepted", "created_at":"…", "returned_at":null }]
-```
+1. **社区范围任务列表**：`GET /api/v1/tasks?scope=community&community_id=<id>` 返回该社区全部任务的公开摘要，其中 `requirements[].state` 与 `candidate_tool_ids` 是服务端派生的公开字段——「已落实」（`confirmed` / `in_use` / `fulfilled` / `self_supplied`）与「可申请」（`match_available` + `candidate_tool_ids`）的区分由服务端直接给出，前端不需要自己推断。
+2. **个人视角**：`GET /api/v1/tasks?scope=mine` 返回本人任务（含 `active_loan_id` 等权限内字段）；`GET /api/v1/loans?role=borrower|owner` 分别返回本人借入与借出。
+3. **工具列表**：`GET /api/v1/tools?community_id=<id>&radius_m=2000` 返回社区内全部工具（含 `reserved` / `on_loan` / `archived`），`availability` 为服务端计算——前端不会向用户推荐已被别人预约的工具。
 
-然后 `GET /api/tasks?postcode=…` 返回该邮编的全部任务（含 requirements）。
+前端（D 的模块）应直接消费 `state` / `candidate_tool_ids` / `availability`，不要在客户端重算匹配规则。
 
-**方案 2（B 只肯给「我的」）**：那我就必须降级。具体是：
+## 10. 验收清单
 
-- 缺口板和成果面板改成只统计**当前用户**的记录，并在界面上写明 scope 变成「your activity only」——`impactReport()` 已经支持这个，只要不传 `postcode` 或改成传 `creatorId`。
-- 「已落实」判断改成只信服务端返回的 `TaskRequirement.loan_request_id`，不再靠 `claimLoans()` 推断。
-
-**告诉我你选哪个**，方案 2 我要改 `impactReport()` 的 scope 参数和面板文案，大概 20 行。
-
-## 8. 验收清单
-
-跑通这 6 条就说明对接成功。前 4 条和第 6 条**必须在两个浏览器窗口 / 两台设备**上做，同一窗口的假数据证明不了多人流程。
-
-- [ ] Alice 选一个行动，Bob 在另一台设备发布一件它缺的工具；**不刷新页面**（或操作后刷新）Alice 就能看到「Available to request」。
-- [ ] Alice 申请后，Bob 那一侧的请求状态是 `pending`，且这个工具在 Alice 的社区页显示为 `Reserved`，**不能再被第三个人申请**。
-- [ ] 两个人**同时**申请同一件工具，只有一个成功，另一个收到 4xx。
-- [ ] Bob 接受后，Alice 页面从「可申请」变成「已落实（Reservation accepted）」，但**不是**「已借出」；Bob 点交接后才变成 `on_loan`。
-- [ ] Bob 确认归还后，工具回到 `available`，可以再次被申请；**任务状态仍然是 `planning`**（归还不等于任务完成）。
-- [ ] Alice 提交成果后刷新页面，`impact.note`、`bags_collected`、`participant_minutes`、`would_have_bought_new` 和 `status: "completed"` 都还在。
-
-## 9. 还没建库时怎么先跑起来
-
-不用等。`web/app.js` 的 `seed()` + localStorage 已经是能跑的假后端，`npm test` 里的端到端测试就走这条路。
-
-如果你想先做个最小 HTTP 后端给前端换，只要让三个 GET 返回**上面 §2 的 JSON 形状**、让 `POST /api/loans` 按 §4.1 校验，其余可以先返回假数据 —— 我的模块不区分数据来自 localStorage 还是 HTTP。
-
-## 10. 我不需要的东西
-
-- 我不做认证、不做权限（那是你的）。
-- 我不需要你实现匹配规则。**请不要在服务端「帮我」算好「可申请 / 已落实」再发给我** —— 两套实现一定会不一致。把原始的工具、请求、任务给我就行。
-- 我不需要你存任何计算结果的快照。`wantedBoard()` / `impactReport()` 每次都从原始数据重算，这也是它们能保证一致的原因。
+- [ ] 两个浏览器窗口分别登录 alice / bob（demo 账号），完成一次「发布 → 建任务 → 申请 → 接受 → 交接 → 归还」全流程，工具 `availability` 回到 `available`。
+- [ ] 两人同时申请同一件工具：只有一个成功，另一个收到 409 `TOOL_UNAVAILABLE`。
+- [ ] 归还后任务状态仍是 `open`；创建者提交成果后 `status: "completed"`，`outcome.note` / `bags_collected` / `volunteer_minutes` 持久化。
+- [ ] 他人借用详情对第三方 404；越权动作 403。
+- [ ] 全部 156 项后端测试见 `backend/docs/TEST_REPORT.md`。
