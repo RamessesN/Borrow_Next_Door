@@ -351,6 +351,41 @@ test('browsing another postcode and then checking your own returns to the home v
   assert.doesNotMatch(app.html(), /id="back-home"/, 'the browse banner is gone again');
 });
 
+test('the context score follows the browsed postcode instead of the home community', async () => {
+  const app = createApp();
+  await app.flush();
+  await signIn(app, 'alice');
+  inject(app, providers(GREEN, AIR, CARBON));
+  const home = JSON.parse(app.run('JSON.stringify(greenContextScore())'));
+  assert.equal(home.value, EXPECTED_TOTAL);
+
+  app.element('#postcode').value = 'EH14 4AS';
+  app.submit('#postcode-form', {});
+  await app.flush();
+  assert.ok(app.run('state.browse'), 'browse mode is active');
+
+  // The browsed community's own providers: a different AQI and clean share.
+  const browsed = providers(
+    [{ id: 'colinton-green', name: 'Colinton Green', distance_km: 0.2, latitude: 55.9045, longitude: -3.249 }],
+    { aqi: 81, source: 'Open-Meteo Air Quality', scope: 'Regional forecast (~11km grid)' },
+    { clean_energy_percentage: 46.6, index: 'moderate', forecast: 150, unit: 'gCO2/kWh',
+      top_source: 'Gas', source: 'NESO Carbon Intensity API', scope: 'Regional grid zone (EH14)' }
+  );
+  app.run(`state.browseEnvironment = ${JSON.stringify(browsed)}; render();`);
+
+  const viewed = JSON.parse(app.run('JSON.stringify(greenContextScore())'));
+  assert.equal(viewed.components.find(c => c.key === 'air_quality').points, 3, 'AQI 81 falls in the lowest band');
+  assert.equal(viewed.components.find(c => c.key === 'carbon_intensity').points, 14, '46.6% clean rounds to 14');
+  assert.equal(viewed.value, 22 + 3 + 14, 'the total is recomputed from the browsed providers');
+  assert.notEqual(viewed.value, home.value, 'the score changes with the browsed postcode');
+
+  const html = app.html();
+  assert.match(html, /score-total"><strong>39<\/strong>/, 'the browsed total is rendered');
+  assert.doesNotMatch(html, /score-total"><strong>84<\/strong>/, 'the home total is gone');
+  assert.match(html, /Regional grid zone \(EH14\)/, 'the browsed electricity scope is shown');
+  assert.doesNotMatch(html, /Regional grid zone \(EH8\)/, 'the home electricity scope is gone');
+});
+
 /* -------------------------------------- boundary cases (reviewer findings) */
 
 test('European AQI band boundaries map to 30/23/15/8/3 at 20/40/60/80/81', async () => {
