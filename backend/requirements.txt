@@ -1,0 +1,7 @@
+# Human-readable requirements with version constraints.
+# Actual pinned versions live in requirements.lock.txt (pip freeze output).
+fastapi>=0.142,<1.0
+uvicorn>=0.54,<1.0
+pydantic>=2.13,<3.0
+httpx>=0.28,<1.0
+pytest>=9.1,<10.0

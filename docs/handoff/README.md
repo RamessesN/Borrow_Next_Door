@@ -4,9 +4,10 @@
 
 | 文档 | 谁读 | 一句话 |
 |---|---|---|
-| [B · 数据层](B-data-layer.md) | 成员 B | 你负责存，我负责算。3 处 schema 变化 + 4 条服务端必须自己保证的规则。**有一个坑必须看 §7：`GET /api/loans` 不能只返回「我的」请求。** |
-| [C · 位置数据](C-location-data.md) | 成员 C | 我只要 4 个数字字段和 1 个可选数组，你不用写新代码。两个接口我已经实测过了。 |
-| [A · 界面边界](A-ui-boundary.md) | 成员 A | 整合已完成，这里写清楚哪些是你的、哪些是我的，以及 3 条不能破的规则（回归测试会挂）。 |
+| [B · 后端已交付契约](B-data-layer.md) | 成员 A / C / D | **B 后端已交付，本文档是事实契约（不是任务书）**：`/api/v1` 路径、Bearer 鉴权、`Idempotency-Key`、冻结枚举（4 类别 / 2 模板）、字段表、状态机、权限、并发错误码、端点全表。 |
+| [B · 旧模型映射表](B-backend-contract.md) | 成员 A / D | 一页「旧模型 → B 契约」对照：`slot`→单需求、`impact`→`outcome`、`planning`→`open`、`tool.status`→`availability`、类别 / 模板映射。 |
+| [C · 位置数据](C-location-data.md) | 成员 C / D | 我只要 4 个数字字段；这些字段现在由 B 的适配器层（`backend/app/adapters/`）经 API 提供。Postcodes.io / Overpass 实测记录是适配器实现参考。 |
+| [A · 界面边界](A-ui-boundary.md) | 成员 A | 整合已完成；已按 B 契约更新：鉴权、`Idempotency-Key`、loading / 错误态要求，以及不能破的 3 条规则（回归测试会挂）。 |
 
 ## 为什么 D 的模块不卡任何人
 
@@ -19,11 +20,12 @@ NONE
 
 所有外部数据（邮编坐标、绿地、工具、借用记录）都由 B 和 C 通过参数喂进来。所以：
 
-- **B 还没建库时**：A 的 localStorage 演示数据就能跑，`npm test` 里那个端到端测试就是这么跑的。
-- **C 还没接 API 时**：坐标缺失只会让「约 X km 直线距离」不显示，其他功能一律正常。
+- **B 已交付**：`/api/v1` + Bearer token 即可对接，契约见 `B-data-layer.md`。
+- **C 的适配器已移植进 `backend/app/adapters/`**：坐标缺失只会让「约 X km 直线距离」不显示，其他功能一律正常。
 
 ## 当前状态
 
 - PR [#1](https://github.com/RamessesN/GREENER_BY_POSTCODE/pull/1) 已合并，`d-task-module` 分支已删除。
-- `npm test`：32 个用例（23 个纯函数 + 4 个端到端演示 + 5 个文档契约）全绿。`node smoke-test.cjs` 照旧通过。
-- 详细字段和规则见 `README.md` 的「D：任务匹配与成果模块」一节。
+- B 后端已交付：`backend/`（FastAPI + SQLite），156 项测试全绿（`backend/docs/TEST_REPORT.md`）。
+- 本文档目录已按 B 契约更新：`B-data-layer.md` 重写为已交付契约，`A-ui-boundary.md` 更新 token 与数据形状，`C-location-data.md` 轻改去除与适配器层的冲突。
+- 集成运行方式见根 `README.md`（前后端启动、演示账号、测试命令）。

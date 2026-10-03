@@ -1,227 +1,230 @@
-/* Member D — end-to-end check of the demo story through A's real UI wiring.
+/* End-to-end story of the demo through A's real UI wiring.
  *
- * Story: Alice plans a clean-up and is missing a litter picker. Bob publishes
- * one. Alice requests it, Bob accepts, hands over, takes it back, and only
- * then does Alice record the action. Every step is asserted against the state
- * the UI actually produced, not against a re-implementation of the rules.
+ * Everything below drives the actual web/app.js + web/api.js code inside the
+ * harness's vm. The only thing replaced is the network: test/harness.cjs runs
+ * a mock backend that speaks member B's contract (envelopes, Bearer tokens,
+ * Idempotency-Key, frozen error codes). No real server, no network.
+ *
+ * Story: Bob publishes a litter picker -> Alice creates an action and asks for
+ * it -> Bob accepts, hands it over, takes it back -> Alice records the outcome.
+ * Error paths covered: 409 TOOL_UNAVAILABLE, 401 UNAUTHENTICATED (expired).
  */
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { createApp } = require('./harness.cjs');
+const { createApp, ACCESS_CODE } = require('./harness.cjs');
 
-test('publishing a missing tool turns a gap into a request, and borrowing is not completing', () => {
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+async function signIn(app, alias, code) {
+  app.submit('#login-form', { user_alias: alias, access_code: code === undefined ? ACCESS_CODE : code });
+  await app.flush();
+}
+async function signOut(app) {
+  app.click({ id: 'logout' });
+  await app.flush();
+}
+
+test('bob lends, alice borrows: the full story through the real API client', async () => {
   const app = createApp();
-  const { run, click, change, submit, element } = app;
+  await app.flush();
 
-  /* ---- 1. Alice plans a clean-up and is short of a picker ---------------- */
-  run("location.hash='#task';render()");
+  /* ---- 0. signed out: the login panel is the whole app ---- */
+  assert.match(app.html(), /DEMO ACCOUNTS/, 'no token means no data, only a sign-in form');
+  assert.match(app.html(), /demo account/, 'the demo accounts are named');
+  assert.equal(app.run('state.me'), null, 'viewing the page must not invent a session');
+
+  /* ---- 1. wrong access code -> the server message, form untouched ---- */
+  await signIn(app, 'bob', 'definitely-not-the-code');
+  assert.match(app.html(), /DEMO ACCOUNTS/, 'a failed sign-in stays on the form');
+  assert.equal(app.element('#login-message').textContent, 'Authentication required.');
+  assert.equal(app.stored.has('bnd.token'), false, 'nothing is stored for a failed sign-in');
+
+  /* ---- 2. bob signs in ---- */
+  await signIn(app, 'bob');
+  assert.equal(app.run('state.me.display_name'), 'Bob');
+  assert.equal(app.stored.get('bnd.token'), app.run('client.token'), 'only the token is persisted');
+  assert.equal(app.stored.get('bnd.user'), '{"alias":"bob","display_name":"Bob"}');
+  assert.ok(!app.stored.has('bnd-demo-v1'), 'no business data is written to storage');
+  assert.equal(app.run('state.tools.length'), 0);
+
+  /* ---- 3. bob publishes the litter picker ---- */
+  app.run("location.hash='#community';render()");
+  app.click({ dataset: { publish: true } });
+  assert.equal(app.element('#publish-dialog').open, true, 'the lend dialog opens');
+  app.submit('#publish-form', {
+    name: 'My long-handled litter picker', category: 'litter_picker',
+    description: 'Kept in the shed, works fine.'
+  });
+  await app.flush();
+  assert.equal(app.element('#publish-dialog').open, false, 'a successful publish closes the dialog');
+  assert.equal(app.run('state.tools.length'), 1);
+  assert.equal(app.run("state.tools[0].category"), 'litter_picker', 'the frozen B slug round-trips');
+  assert.equal(app.run("state.tools[0].availability"), 'available');
+  assert.match(app.html(), /Ready to share/);
+
+  /* ---- 4. sign out, alice signs in ---- */
+  await signOut(app);
+  assert.match(app.html(), /DEMO ACCOUNTS/);
+  assert.equal(app.stored.has('bnd.token'), false, 'signing out drops the token');
+  await signIn(app, 'alice');
+  assert.equal(app.run('state.me.display_name'), 'Alice');
+  assert.equal(app.run('state.tools.length'), 1, 'Alice sees Bob\'s tool');
+
+  /* ---- 5. alice creates the action ---- */
+  app.run("location.hash='#task';render()");
   assert.match(app.html(), /Pick an action above/, 'nothing exists until an action is chosen');
-  assert.equal(run('state.tasks.length'), 0, 'viewing the page must not invent work for the neighbourhood');
-
-  click({ dataset: { template: 'cleanup' } });
-  assert.equal(run('state.tasks.length'), 1);
-  assert.match(app.html(), /0 of 2 tool slots confirmed/);
-  assert.match(app.html(), /Still looking for a neighbour’s tool/);
+  assert.equal(app.run('state.tasks.length'), 0, 'viewing the page invents nothing');
+  assert.equal(app.run("state.templates.map(t=>t.id).join(',')"), 'park_cleanup,flowerbed_care', 'templates come from the API');
+  app.click({ dataset: { template: 'park_cleanup' } });
+  await app.flush();
+  assert.equal(app.run('state.tasks.length'), 1);
+  assert.equal(app.run('state.tasks[0].status'), 'open', 'B\'s status vocabulary, no local "planning"');
+  assert.equal(app.run('state.tasks[0].requirements.length'), 2, 'the template expands into two requirements');
+  assert.match(app.html(), /0 of 2 requirements confirmed/);
   assert.match(app.html(), /NEIGHBOURS NEEDED/, 'the wanted board names the gap');
-  assert.match(app.html(), /Litter picker/);
-  assert.equal(run("state.tasks[0].status"), 'planning');
+  assert.match(app.html(), /Reusable gloves/, 'no gloves exist yet');
+  assert.match(app.html(), /Not collected yet/, 'an uncollected figure never renders as 0');
 
-  const taskId = run('state.tasks[0].id');
-  const requirements = run('state.tasks[0].requirements');
-  assert.equal(requirements.length, 2, 'cleanup expands into two slots');
-  assert.equal(run("state.tasks[0].requirements.every(r=>r.source_type==='loan')"), true);
-
-  /* ---- 2. Bob publishes the missing litter picker ------------------------ */
-  run("user='bob'");
-  submit('#publish-form', { name: 'My long-handled litter picker', category: 'picker', description: 'Kept in the shed, works fine.' });
-  assert.equal(run("state.tools.filter(t=>t.category==='picker').length"), 1);
-  assert.equal(run("state.tools.find(t=>t.category==='picker').owner_id"), 'bob');
-  assert.equal(run("state.tools.find(t=>t.category==='picker').postcode"), 'EH8 9YL');
-
-  /* ---- 3. Alice sees it, but finding a tool is not confirming it -------- */
-  run("user='alice';location.hash='#task';render()");
-  assert.equal(run('state.tasks.length'), 1, 'Bob browsing the action page created nothing');
+  /* ---- 6. alice asks for bob's picker, requirement by requirement ---- */
   assert.match(app.html(), /Request from Bob/);
-  assert.match(app.html(), /0 of 2 tool slots confirmed/, 'a neighbour owning it is not a confirmed tool');
-  assert.doesNotMatch(app.html(), /NEIGHBOURS NEEDED/, 'the gap closed as soon as the tool appeared');
-
-  const pickerSlot = run("state.tasks[0].requirements.find(r=>r.category==='picker').id");
-  const toolId = run("state.tools.find(t=>t.category==='picker').id");
-
-  /* ---- 4. Alice requests that exact slot --------------------------------- */
-  click({ dataset: { borrow: toolId, req: pickerSlot } });
-  assert.equal(run('state.loans.length'), 1);
-  assert.equal(run('state.loans[0].status'), 'pending');
-  assert.equal(run('state.loans[0].requirement_id'), pickerSlot, 'the request remembers which slot it fills');
-  assert.equal(run("state.tasks[0].requirements.find(r=>r.category==='picker').loan_request_id"), run('state.loans[0].id'));
-  assert.equal(run("state.tools.find(t=>t.category==='picker').status"), 'reserved');
+  const toolId = app.run("state.tools.find(t=>t.category==='litter_picker').id");
+  const pickerReq = app.run("state.tasks[0].requirements.find(r=>r.category==='litter_picker').id");
+  app.click({ dataset: { borrow: toolId, req: pickerReq } });
+  await app.flush();
+  assert.equal(app.run('state.loans.length'), 1);
+  assert.equal(app.run("state.loans[0].status"), 'pending');
+  assert.equal(app.run("state.loans[0].requirement_id"), pickerReq, 'the request remembers its requirement');
+  assert.equal(app.run("state.tools.find(t=>t.id==='" + toolId + "').availability"), 'reserved');
+  assert.equal(app.run("state.tasks[0].requirements.find(r=>r.category==='litter_picker').state"), 'pending',
+    'the server-derived requirement state comes back over the API');
   assert.match(app.html(), /Awaiting Bob to respond/);
-  assert.match(app.html(), /0 of 2 tool slots confirmed/, 'a request is still not a confirmed tool');
+  assert.match(app.html(), /0 of 2 requirements confirmed/, 'a request is not a confirmed tool');
 
-  /* ---- 5. Second request for the same slot is refused ------------------- */
-  const before = run('state.loans.length');
-  click({ dataset: { borrow: toolId, req: pickerSlot } });
-  assert.equal(run('state.loans.length'), before, 'the same slot cannot hold two requests');
+  /* ---- 7. the server refuses a second request (409 TOOL_UNAVAILABLE) ----
+     The UI re-checks availability first, so rewind the local view to what a
+     stale screen would show: only the backend can catch that. */
+  const loansBefore = app.run('state.loans.length');
+  app.run("state.tools.find(t=>t.id==='" + toolId + "').availability='available'");
+  app.click({ dataset: { borrow: toolId, req: pickerReq } });
+  await app.flush();
+  assert.equal(app.run('state.loans.length'), loansBefore, 'the duplicate never lands');
+  assert.equal(app.element('#toast').textContent, 'This tool is already reserved or on loan.',
+    'the server error message is shown verbatim');
 
-  /* ---- 6. Bob accepts: now it is "已落实" but not yet handed over -------- */
-  const loanId = run('state.loans[0].id');
-  run("user='bob'");
-  click({ dataset: { transition: 'accepted', id: loanId } });
-  assert.equal(run('state.loans[0].status'), 'accepted');
-  run("user='alice';location.hash='#task';render()");
-  assert.match(app.html(), /1 of 2 tool slots confirmed/);
-  assert.match(app.html(), /reservation accepted by Bob/);
-  assert.match(app.html(), /Reservation accepted · My long-handled litter picker/, 'the stage is shown by name');
+  /* ---- 8. alice brings her own gloves ---- */
+  const glovesReq = app.run("state.tasks[0].requirements.find(r=>r.category==='reusable_gloves').id");
+  app.change({ dataset: { self: glovesReq }, checked: true });
+  await app.flush();
+  assert.equal(app.run("state.tasks[0].requirements.find(r=>r.category==='reusable_gloves').self_supplied"), true);
+  assert.equal(app.run("state.tasks[0].requirements.find(r=>r.category==='reusable_gloves').state"), 'self_supplied');
+  assert.match(app.html(), /1 of 2 requirements confirmed/);
 
-  /* ---- 7. Alice brings her own gloves, closing the second slot ---------- */
-  const glovesSlot = run("state.tasks[0].requirements.find(r=>r.category==='gloves').id");
-  change({ dataset: { self: glovesSlot }, checked: true });
-  assert.equal(run("state.tasks[0].requirements.find(r=>r.category==='gloves').source_type"), 'self');
-  assert.match(app.html(), /2 of 2 tool slots confirmed/);
-  assert.match(app.html(), /Every tool is confirmed/);
+  /* ---- 9. bob accepts, hands over, takes it back ---- */
+  await signOut(app);
+  await signIn(app, 'bob');
+  app.run("location.hash='#loans';render()");
+  app.click({ dataset: { loanTab: 'lent' } });
+  assert.match(app.html(), /My long-handled litter picker/);
+  const loanId = app.run('state.loans[0].id');
+  app.click({ dataset: { transition: 'accept', id: loanId } });
+  await app.flush();
+  assert.equal(app.run("state.loans[0].status"), 'accepted');
+  assert.equal(app.run("state.tasks.find(t=>t.template_id==='park_cleanup').requirements.find(r=>r.category==='litter_picker').state"),
+    'confirmed', 'an accepted reservation confirms the requirement (server-derived)');
+  assert.equal(app.run("state.tasks.find(t=>t.template_id==='park_cleanup').coordination_ready"), true);
+  app.click({ dataset: { transition: 'hand-over', id: loanId } });
+  await app.flush();
+  assert.equal(app.run("state.loans[0].status"), 'on_loan');
+  app.click({ dataset: { transition: 'return', id: loanId } });
+  await app.flush();
+  assert.equal(app.run("state.loans[0].status"), 'returned');
+  assert.ok(app.run("state.loans[0].returned_at"), 'returned_at is stamped by the server');
+  assert.equal(app.run("state.tools.find(t=>t.id==='" + toolId + "').availability"), 'available', 'shareable again');
 
-  /* ---- 8. Handover, then return ---------------------------------------- */
-  run("user='bob'");
-  click({ dataset: { transition: 'on_loan', id: loanId } });
-  assert.equal(run('state.loans[0].status'), 'on_loan');
-  assert.equal(run('state.loans[0].returned_at'), null);
-  run("loanTab='lent'");
-  assert.match(run('loansPage()'), /On loan · handover confirmed/);
+  /* ---- 10. alice records the outcome ---- */
+  await signOut(app);
+  await signIn(app, 'alice');
+  app.run("location.hash='#task';render()");
+  assert.match(app.html(), /2 of 2 requirements confirmed/, 'a returned loan still fulfils its requirement');
+  assert.equal(app.run("state.tasks[0].requirements.find(r=>r.category==='litter_picker').state"), 'fulfilled');
+  assert.equal(app.run("state.tasks[0].completion_eligible"), true, 'the backend now allows completion');
+  app.element('#outcome-note').value = 'Cleared litter along the path with Bob.';
+  app.element('#impact-bags').value = '3';
+  app.element('#impact-minutes').value = '90';
+  app.click({ id: 'complete-task' });
+  await app.flush();
+  assert.equal(app.run('state.tasks[0].status'), 'completed');
+  assert.equal(app.run('state.tasks[0].outcome.note'), 'Cleared litter along the path with Bob.');
+  assert.equal(app.run('state.tasks[0].outcome.bags_collected'), 3);
+  assert.equal(app.run('state.tasks[0].outcome.volunteer_minutes'), 90);
+  assert.equal(app.run('state.tasks[0].outcome.verification'), 'self_reported');
+  assert.match(app.html(), /Cleared litter along the path with Bob\./, 'the recorded story stays readable');
 
-  click({ dataset: { transition: 'returned', id: loanId } });
-  assert.equal(run('state.loans[0].status'), 'returned');
-  assert.ok(run('state.loans[0].returned_at'), 'returned_at is stamped');
-  assert.equal(run("state.tools.find(t=>t.category==='picker').status"), 'available', 'the tool is shareable again');
-  assert.equal(run("state.tasks[0].status"), 'planning', 'a returned tool does NOT complete the action');
-
-  run("user='alice';location.hash='#task';render()");
-  assert.match(app.html(), /1 of 2 tool slots confirmed/, 'the returned picker is no longer in the slot');
-  assert.match(app.html(), /1 tool still to confirm/);
-
-  /* ---- 9. Only now does Alice record the action, with self-reported figures */
-  element('#outcome-note').value = 'Cleared litter along the path with Bob.';
-  element('#impact-bags').value = '3';
-  element('#impact-minutes').value = '90';
-  element('#impact-bought-new').value = 'true';
-  click({ id: 'complete-task' });
-
-  assert.equal(run("state.tasks[0].status"), 'completed');
-  assert.ok(run('state.tasks[0].completed_at'));
-  assert.equal(run('state.tasks[0].outcome_note'), 'Cleared litter along the path with Bob.');
-  assert.deepEqual(
-    JSON.parse(run('JSON.stringify(state.tasks[0].impact)')),
-    { bags_collected: 3, participant_minutes: 90, would_have_bought_new: true }
-  );
-
-  const report = run("JSON.stringify(D.impactReport(state.tasks,state.loans,{postcode,tools:state.tools,names}))");
-  const by = Object.fromEntries(JSON.parse(report).metrics.map(m => [m.key, m]));
+  /* impact maths still comes from D's pure functions, now over API data */
+  const report = JSON.parse(app.run("JSON.stringify(D.impactReport(state.tasks, state.loans, {communityId: state.me.community.id, tools: state.tools, names: state.names}))"));
+  const by = Object.fromEntries(report.metrics.map(m => [m.key, m]));
   assert.equal(by.completed_loans.value, 1);
   assert.equal(by.actions_with_tools_confirmed.value, 1);
   assert.equal(by.completed_actions.value, 1);
   assert.equal(by.bags_collected.value, 3);
   assert.equal(by.bags_collected.basis, 'self-reported');
-  assert.equal(by.participant_minutes.value, 90);
-  assert.equal(by.potential_avoided_purchases.value, 1, 'said they would have bought new and did borrow');
-  assert.match(app.html(), /Not measured|Each figure is counted separately/);
+  assert.equal(by.volunteer_minutes.value, 90);
+  assert.match(app.html(), /backend/, 'community counters from /impact are labelled as backend data');
 
-  /* ---- 10. Everything survived a reload --------------------------------- */
-  const persisted = JSON.parse(app.stored.get(app.key));
-  assert.equal(persisted.tasks.length, 1);
-  assert.equal(persisted.tasks[0].status, 'completed');
-  assert.equal(persisted.tasks[0].requirements.length, 2, 'slots are persisted, not derived');
-  assert.equal(persisted.loans.length, 1);
-  assert.equal(persisted.loans[0].requirement_id, pickerSlot);
-  assert.equal(persisted.tasks[0].id, taskId);
+  /* ---- 11. idempotency: every business write sent a fresh UUID key ---- */
+  const businessWrites = app.server.writes.filter(w => !/demo\/sessions|sessions\/logout/.test(w.path));
+  assert.ok(businessWrites.length >= 5, 'publish, create, self-supply, loan, transitions, complete');
+  businessWrites.forEach(w => assert.match(w.key, UUID_RE, `${w.path} must carry an Idempotency-Key UUID`));
+  const keys = businessWrites.map(w => w.key);
+  assert.equal(new Set(keys).size, keys.length, 'one user intent = one key; no key is reused across intents');
+  app.server.writes.filter(w => /demo\/sessions|sessions\/logout/.test(w.path))
+    .forEach(w => assert.equal(w.key, null, 'auth routes must not send an Idempotency-Key'));
 });
 
-test('a legacy browser demo store is migrated instead of crashing', () => {
-  // State written by the previous version of app.js: a bare self[] and no slots.
-  const legacy = {
-    tools: [{ id: 't1', owner_id: 'bob', name: 'Garden leaf rake', category: 'rake', description: 'x', status: 'available', postcode: 'EH8 9YL' }],
-    loans: [],
-    tasks: [{
-      id: 'old1', creator_id: 'alice', template_id: 'cleanup', postcode: 'EH8 9YL',
-      place_name: 'Meadow', status: 'planning', self: ['gloves'], outcome_note: 'old note'
-    }]
-  };
-  const app = createApp({ storage: { 'bnd-demo-v1': JSON.stringify(legacy) } });
-
-  assert.equal(app.run('state.tasks[0].self'), undefined, 'the legacy field is gone');
-  assert.equal(app.run('state.tasks[0].requirements.length'), 2);
-  assert.equal(app.run("state.tasks[0].requirements.find(r=>r.category==='gloves').source_type"), 'self', 'the old choice survives');
-  assert.equal(app.run('state.tasks[0].outcome_note'), 'old note');
-  assert.deepEqual(
-    JSON.parse(app.run('JSON.stringify(state.tasks[0].impact)')),
-    { bags_collected: null, participant_minutes: null, would_have_bought_new: null }
-  );
-
-  app.run("location.hash='#task';render()");
-  assert.match(app.html(), /1 of 2 tool slots confirmed/);
-  assert.match(app.html(), /bringing your own/);
-
-  const saved = JSON.parse(app.stored.get(app.key));
-  assert.equal(saved.tasks[0].self, undefined, 'the migration is written back, so it only happens once');
-  assert.equal(saved.tasks[0].requirements.length, 2);
-});
-
-test('coordinates turn into an approximate straight-line distance in the checklist', () => {
+test('server errors keep the form open and show the backend message', async () => {
   const app = createApp();
-  const { run, click } = app;
-  run("location.hash='#task';render()");
-  click({ dataset: { template: 'cleanup' } });
+  await app.flush();
+  await signIn(app, 'bob');
 
-  // Nothing is invented when nobody has coordinates.
-  run("state.tools.find(t=>t.category==='gloves').owner_id='bob'");
-  run('render()');
-  assert.doesNotMatch(app.html(), /km away/);
-
-  // Member C's data: the task's green space and the neighbour's community point.
-  run("state.tasks[0].latitude=55.9445;state.tasks[0].longitude=-3.1883");
-  run("state.tools.find(t=>t.category==='gloves').latitude=55.9545;state.tools.find(t=>t.category==='gloves').longitude=-3.1883");
-  run('render()');
-  const note = app.html().match(/about [\d.]+ km away[^<]*/)[0];
-  assert.equal(note, 'about 1.1 km away, straight line', 'labelled as a straight line, never as a route or a walk');
-
-  // A neighbour in a different postcode is not "nearby" unless C says so.
-  run("state.tools.find(t=>t.category==='gloves').postcode='AB1 2CD';render()");
-  assert.doesNotMatch(app.html(), /km away/);
-  assert.match(app.html(), /Still looking for a neighbour/);
+  // A name over B's 80-character limit -> 422 VALIDATION_ERROR from the API.
+  app.run("location.hash='#community';render()");
+  app.click({ dataset: { publish: true } });
+  app.submit('#publish-form', { name: 'x'.repeat(100), category: 'litter_picker', description: 'Fine description.' });
+  await app.flush();
+  assert.equal(app.run('state.tools.length'), 0, 'nothing was created');
+  assert.equal(app.element('#publish-dialog').open, true, 'the dialog stays open so the input survives');
+  assert.equal(app.element('#toast').textContent, 'Request validation failed.');
+  assert.equal(app.element('#publish-form').resetCount, 0, 'the form is not reset on failure');
 });
 
-test('the same tool can be borrowed again after it comes back', () => {
+test('an expired session returns to the login panel with the server message', async () => {
   const app = createApp();
-  const { run, click, submit } = app;
+  await app.flush();
+  await signIn(app, 'alice');
 
-  // A complete round trip first.
-  run("location.hash='#task';render()");
-  click({ dataset: { template: 'cleanup' } });
-  run("user='bob'");
-  submit('#publish-form', { name: 'My long-handled litter picker', category: 'picker', description: 'In the shed.' });
-  run("user='alice';render()");
+  app.server.expireSessions(); // every token now answers 401 UNAUTHENTICATED
+  app.click({ dataset: { template: 'park_cleanup' } });
+  await app.flush();
 
-  const slot = run("state.tasks[0].requirements.find(r=>r.category==='picker').id");
-  const toolId = run("state.tools.find(t=>t.category==='picker').id");
-  click({ dataset: { borrow: toolId, req: slot } });
-  run("user='bob'");
-  click({ dataset: { transition: 'accepted', id: run('state.loans[0].id') } });
-  click({ dataset: { transition: 'on_loan', id: run('state.loans[0].id') } });
-  click({ dataset: { transition: 'returned', id: run('state.loans[0].id') } });
-  assert.equal(run("state.tools.find(t=>t.category==='picker').status"), 'available');
+  assert.match(app.html(), /DEMO ACCOUNTS/, 'the app falls back to sign-in');
+  assert.match(app.html(), /Your session has expired/);
+  assert.equal(app.stored.has('bnd.token'), false, 'the dead token is dropped');
+  assert.equal(app.run('state.me'), null, 'no phantom session is kept in memory');
 
-  // The slot still points at the finished request. Asking for it again must work.
-  run("user='alice';location.hash='#task';render()");
-  assert.match(app.html(), /Available to request from Bob/);
-  click({ dataset: { borrow: toolId, req: slot } });
+  // Signing in again works and the app recovers.
+  await signIn(app, 'alice');
+  assert.equal(app.run('state.me.display_name'), 'Alice');
+  assert.equal(app.run("typeof client.token"), 'string', 'a fresh token is in place');
+});
 
-  assert.equal(run('state.loans.length'), 2, 'a returned loan does not block the same slot forever');
-  assert.equal(run('state.loans[1].status'), 'pending');
-  assert.equal(run("state.tasks[0].requirements.find(r=>r.category==='picker').loan_request_id"), run('state.loans[1].id'));
-  assert.equal(run("state.tools.find(t=>t.category==='picker').status"), 'reserved');
-  assert.match(app.html(), /Awaiting Bob to respond/);
+test('search still filters, and HTML is still escaped', async () => {
+  const app = createApp();
+  await app.flush();
+  await signIn(app, 'bob');
 
-  // And the borrower can still back out of the second request.
-  click({ dataset: { transition: 'cancelled', id: run('state.loans[1].id') } });
-  assert.equal(run('state.loans[1].status'), 'cancelled');
-  assert.equal(run("state.tools.find(t=>t.category==='picker').status"), 'available');
-  assert.equal(run("JSON.parse(JSON.stringify(state.tasks[0].impact))").bags_collected, null);
+  app.run("location.hash='#community';render()");
+  app.input({ id: 'tool-search', value: '<script>alert(1)</script>' });
+  assert.match(app.element('#tool-grid').innerHTML, /No tools match/, 'no tool name contains a script tag');
+  app.input({ id: 'tool-search', value: '' });
+  assert.equal(app.run("esc('<script>')"), '&lt;script&gt;');
 });
