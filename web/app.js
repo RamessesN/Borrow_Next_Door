@@ -42,7 +42,14 @@ let token = readStore(TOKEN_KEY);
 if (token) client.setToken(token);
 
 function freshState() {
-  return { me: null, templates: [], tools: [], tasks: [], loans: [], environment: null, impact: null, names: {} };
+  return {
+    me: null, templates: [], tools: [], tasks: [], loans: [],
+    environment: null, impact: null, names: {},
+    /* Browse context: null = looking at my own (home) community; otherwise the
+       community resolved from the postcode the visitor typed. Only the
+       community home page follows it — tasks and loans stay on the account. */
+    browse: null, browseTools: null, browseEnvironment: null
+  };
 }
 let state = freshState();
 let ui = { filter: 'all', search: '', loanTab: 'borrowed', busy: false, loading: false, message: '' };
@@ -55,6 +62,7 @@ function buildNames() {
   const add = (id, name) => { if (id && name) names[id] = name; };
   if (state.me) add(state.me.id, state.me.display_name);
   state.tools.forEach(t => add(t.owner.id, t.owner.display_name));
+  (state.browseTools || []).forEach(t => add(t.owner.id, t.owner.display_name));
   state.tasks.forEach(t => add(t.creator.id, t.creator.display_name));
   state.names = names;
 }
@@ -92,6 +100,24 @@ async function refresh() {
   state.environment = environment;
   state.impact = impact;
   buildNames();
+  await refreshBrowse();
+}
+
+/** While browsing another postcode, keep that community's environment card and
+ *  tool list in step with the home data refreshed above. Failures keep the
+ *  previous paint rather than blanking the page. */
+async function refreshBrowse() {
+  if (!state.browse) return;
+  const bid = state.browse.id;
+  const [environment, tools] = await Promise.all([
+    soft(client.communityEnvironment(bid)),
+    soft(client.listTools({ community_id: bid, radius_m: 2000, limit: 100 }))
+  ]);
+  if (state.browse && state.browse.id === bid) {
+    if (environment) state.browseEnvironment = environment;
+    if (tools) state.browseTools = tools;
+    buildNames();
+  }
 }
 
 /* ------------------------------------------------------------------ geometry */
@@ -107,7 +133,16 @@ function slot(name, placeholder){const raw=window.BND_INTEGRATIONS?.[name];if(!r
 
 /* ------------------------------------------------------------------ routing */
 function page(){return ['community','task','loans'].includes(location.hash.slice(1))?location.hash.slice(1):'community';}
-const postcode = () => (state.me ? state.me.community.postcode : '');
+/* The signed-in account's own community — what tasks, loans and lending use. */
+const homeCommunity = () => (state.me ? state.me.community : null);
+const homePostcode = () => (state.me ? state.me.community.postcode : '');
+const homeOutcode = () => (state.me ? state.me.community.outcode : '');
+/* What the community home page is showing: the browsed postcode's community,
+   or the account's own when nothing has been checked. */
+const currentCommunity = () => state.browse || homeCommunity();
+const postcode = () => { const c = currentCommunity(); return c ? c.postcode : ''; };
+const visibleTools = () => (state.browse ? (state.browseTools || []) : state.tools);
+const visibleEnvironment = () => (state.browse ? state.browseEnvironment : state.environment);
 const myTasks = () => state.tasks.filter(t => state.me && t.creator && t.creator.id === state.me.id);
 const myOpenTask = () => myTasks().filter(t => t.status === 'open')
   .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))[0] || null;
@@ -124,10 +159,9 @@ function loginView(message) {
   return `<div class="login-shell"><section class="panel login-panel">
   <span class="eyebrow">DEMO ACCOUNTS</span>
   <h2>Sign in to your street.</h2>
-  <p class="muted">Borrow Next Door runs in demo mode against the local API. Choose an account and enter the shared access code (runtime config — never stored in this page).</p>
+  <p class="muted">Borrow Next Door runs in demo mode against the local API. Pick a demo account and sign in — no access code, no real registrations.</p>
   <form id="login-form">
-    <label>Account<select name="user_alias"><option value="alice">Alice · demo account</option><option value="bob">Bob · demo account</option></select></label>
-    <label>Access code<input name="access_code" type="password" autocomplete="off" placeholder="Team DEMO_ACCESS_CODE" required></label>
+    <label>Account<select name="user_alias"><option value="alice">Alice · demo account</option><option value="bob">Bob · demo account</option><option value="carol">Carol · demo account</option></select></label>
     <p class="field-message ${message ? 'error' : ''}" id="login-message">${esc(message || 'Demo accounts only — no real registrations.')}</p>
     <button class="btn primary" type="submit">Sign in <span>↗</span></button>
   </form>
@@ -148,7 +182,7 @@ function bootErrorView(message) {
   return `<div class="login-shell"><section class="panel login-panel"><span class="eyebrow">CONNECTION</span>
   <h2>We cannot reach the API.</h2><p class="field-message error">${esc(message)}</p>
   <p class="muted">Start the backend, then try again:</p>
-  <p class="notice"><code>DEMO_ACCESS_CODE=&lt;your team code&gt; backend/.venv/bin/uvicorn app.main:app --port 8000</code></p>
+  <p class="notice"><code>backend/.venv/bin/uvicorn app.main:app --port 8000</code></p>
   <button class="btn primary" id="retry-boot">Try again <span>↗</span></button></section></div>`;
 }
 function setLoginMessage(message) {
@@ -182,7 +216,9 @@ async function boot() {
 /* --------------------------------------------------------------- busy wrapper */
 function setButtonsDisabled(off) { document.querySelectorAll('button').forEach(b => { b.disabled = off; }); }
 function handleError(err, opts) {
-  // A 401 while signing in means "wrong access code", not "expired session".
+  // A 401 while signing in means "unknown demo account", not "expired
+  // session" — the caller opts out of the session-clearing path with
+  // { ignoreAuth: true } and shows its own message instead.
   if (err && err.code === 'UNAUTHENTICATED' && !(opts && opts.ignoreAuth)) {
     clearSession(); state = freshState();
     renderLogin('Your session has expired. Please sign in again.');
@@ -217,7 +253,7 @@ function provider(env, key) {
   return env[key] || null;
 }
 function envCard(icon, title, providerKey, source) {
-  const p = provider(state.environment, providerKey);
+  const p = provider(visibleEnvironment(), providerKey);
   const ok = !!p && (p.status === 'ok' || p.status === 'cached');
   const detail = ok ? (p.attribution || p.source || 'Connected') : `${source} · awaiting provider`;
   const inner = `<span class="env-icon">${icon}</span><div><h3>${title}</h3><strong>${ok ? esc(String(p.attribution || 'Connected').slice(0, 30)) : 'Awaiting data'}</strong><span class="status-tag">${ok ? 'Connected' : 'Not connected'}</span><p>${esc(detail)}</p></div>`;
@@ -225,12 +261,17 @@ function envCard(icon, title, providerKey, source) {
 }
 function toolCards() {
   const me = state.me;
-  const tools = state.tools.filter(t => t.availability !== 'archived' &&
+  const tools = visibleTools().filter(t => t.availability !== 'archived' &&
     String(t.name || '').toLowerCase().includes(ui.search.toLowerCase()) &&
     (ui.filter === 'all' || ui.filter === 'available' && t.availability === 'available' ||
      ui.filter === 'garden' && groupOf(t.category) === 'garden' ||
      ui.filter === 'cleanup' && groupOf(t.category) === 'cleanup'));
-  if (!tools.length) return `<div class="empty"><h3>A little room for sharing.</h3><p>No tools match this search in ${esc(postcode())}.</p><button class="btn secondary" data-publish>Lend the first tool ↗</button></div>`;
+  if (!tools.length) {
+    const where = esc(postcode());
+    return state.browse
+      ? `<div class="empty"><h3>Nothing listed in ${where} yet.</h3><p>No tools match this search in ${where}. Lending still happens in your home community, ${esc(homePostcode())}.</p><button class="btn secondary" data-publish>Lend a tool at home ↗</button></div>`
+      : `<div class="empty"><h3>A little room for sharing.</h3><p>No tools match this search in ${where}.</p><button class="btn secondary" data-publish>Lend the first tool ↗</button></div>`;
+  }
   return tools.map(t => {
     const own = me && t.owner.id === me.id;
     const statusLabel = { available: 'Ready to share', reserved: 'Reserved', on_loan: 'Out helping', archived: 'Archived' }[t.availability] || t.availability;
@@ -238,15 +279,25 @@ function toolCards() {
     return `<article class="tool-card"><div class="tool-art ${esc(SVG_KEY[t.category] || 'spade')}">${toolSVG(SVG_KEY[t.category])}<span class="tool-status ${t.availability === 'available' ? '' : 'busy'}"><i></i>${esc(statusLabel)}</span></div><div class="tool-body"><h3>${esc(t.name)}</h3><span class="tool-owner">${esc(t.owner.display_name)}’s tool · ${esc(t.community.postcode)}${distance}</span><div class="tool-bottom"><span>Free to borrow</span><button data-borrow="${esc(t.id)}" ${t.availability !== 'available' || own ? 'disabled' : ''}>${own ? 'Your tool' : t.availability === 'available' ? 'Borrow ↗' : 'Unavailable'}</button></div></div></article>`;
   }).join('');
 }
+/* The line under the postcode box: plain status at home, or the browse banner
+   with the way back once another postcode has been checked. */
+function postcodeMessage() {
+  if (state.browse) {
+    return `<span>Browsing ${esc(state.browse.postcode)} (${esc(state.browse.outcode)}). Your lending home stays ${esc(homePostcode())}.</span> <button type="button" id="back-home">Back to my street</button>`;
+  }
+  return `<span>Your community: ${esc(homePostcode())} · served by the backend</span>`;
+}
 function community() {
   const me = state.me;
   const banner = state.impact;
-  return `<section class="hero"><div class="hero-copy"><span class="location"><i></i> Small actions. Right on your doorstep.</span><h1>A little sharing.<br>A <em>greener</em><br>neighbourhood.</h1><p>The tools you need might be just next door.<br>Borrow, lend, and make your patch a little better.</p><form class="postcode-form" id="postcode-form"><span aria-hidden="true">⌖</span><input id="postcode" aria-label="Your UK postcode" value="${esc(postcode())}" maxlength="10" required><button type="submit">Check a postcode ↗</button></form><p class="field-message" id="postcode-message">Your community: ${esc(postcode())} · served by the backend</p></div><div class="hero-art">${gardenArt()}<span class="art-note">Good things grow together.</span><div class="art-label"><div class="mini-avatars"><span>A</span><span>B</span><span>♡</span></span><span>Less buying. More belonging.</span></div></div></section>
-<section><div class="section-heading"><div><h2>A small look at your local patch</h2><p>Environmental context for ${esc(postcode())} — reported per provider by the API.</p></div><span class="eyebrow">YOUR POSTCODE, TOGETHER</span></div><div class="environment">${envCard('≋','The air around you','air_quality','Open-Meteo')}${envCard('ϟ','Your regional electricity','carbon_intensity','NESO Carbon Intensity')}<div class="env-card"><span class="env-icon">♧</span><div><h3>Room to grow</h3><strong>${esc(greenspaceLabel())}</strong><p>Green spaces near ${esc(me.community.outcode)}</p></div></div></div></section>
+  const shown = currentCommunity();
+  const shownOutcode = esc(shown ? shown.outcode : '');
+  return `<section class="hero"><div class="hero-copy"><span class="location"><i></i> Small actions. Right on your doorstep.</span><h1>A little sharing.<br>A <em>greener</em><br>neighbourhood.</h1><p>The tools you need might be just next door.<br>Borrow, lend, and make your patch a little better.</p><form class="postcode-form" id="postcode-form"><span aria-hidden="true">⌖</span><input id="postcode" aria-label="Your UK postcode" value="${esc(postcode())}" maxlength="10" required><button type="submit">Check a postcode ↗</button></form><p class="field-message" id="postcode-message">${postcodeMessage()}</p></div><div class="hero-art">${gardenArt()}<span class="art-note">Good things grow together.</span><div class="art-label"><div class="mini-avatars"><span>A</span><span>B</span><span>♡</span></span><span>Less buying. More belonging.</span></div></div></section>
+<section><div class="section-heading"><div><h2>A small look at your local patch</h2><p>Environmental context for ${esc(postcode())} — reported per provider by the API.</p></div><span class="eyebrow">${state.browse ? `BROWSING ${esc(state.browse.outcode)}` : 'YOUR POSTCODE, TOGETHER'}</span></div><div class="environment">${envCard('≋','The air around you','air_quality','Open-Meteo')}${envCard('ϟ','Your regional electricity','carbon_intensity','NESO Carbon Intensity')}<div class="env-card"><span class="env-icon">♧</span><div><h3>Room to grow</h3><strong>${esc(greenspaceLabel())}</strong><p>Green spaces near ${shownOutcode}</p></div></div></div></section>
 <div class="workspace"><section><div class="section-heading"><div><h2>Good tools. Great neighbours.</h2><p>Something sitting in your shed could start something good.</p></div><button class="btn secondary" data-publish>＋ Lend a tool</button></div><div class="filterbar"><div class="filters">${[['all','All tools'],['garden','Gardening'],['cleanup','Clean-up'],['available','Available']].map(([v,l])=>`<button class="chip ${ui.filter===v?'active':''}" data-filter="${v}">${l}</button>`).join('')}</div><input class="search-input" id="tool-search" value="${esc(ui.search)}" placeholder="Search tools…" aria-label="Search tools"></div><div class="tool-grid" id="tool-grid">${toolCards()}</div></section><aside><div class="action-card"><span class="eyebrow">LET’S DO SOME GOOD</span><span class="flower">✳</span><h2>A greener street<br>starts with us.</h2><p>Pick a small action. Find the tools.<br>Make a difference, together.</p><a class="btn primary" href="#task">Start a community action <span>↗</span></a></div><div class="map-card"><h3>⌖ Your next little project</h3>${slot('map','<div class="map-placeholder"><span class="map-symbol">⌑</span><b>A space for your neighbourhood map</b><small>Green spaces module · ready to connect</small></div>')}<p>Real places appear when the location module is connected.</p></div></aside></div><div class="bottom-banner"><span>✳</span><div><strong>The more we share, the more we can do.</strong><p>${banner ? `${banner.active_tools_count} tools shared · ${banner.returned_loans_count} returned loans · ${banner.completed_tasks_count} completed actions in ${esc(me.community.outcode)}.` : 'A missing litter picker today. A whole community clean-up tomorrow.'}</p></div><button class="text-button" data-publish>Be someone’s helpful neighbour ↗</button></div>`;
 }
 function greenspaceLabel() {
-  const p = provider(state.environment, 'greenspace');
+  const p = provider(visibleEnvironment(), 'greenspace');
   if (p && (p.status === 'ok' || p.status === 'cached')) return p.attribution || 'Connected';
   return 'Find a green space';
 }
@@ -309,7 +360,7 @@ function taskPage() {
       ? `<p class="muted">Recorded ${esc(String(storyTask.completed_at || '').slice(0, 16).replace('T', ' '))} UTC.</p><label>Your outcome<textarea id="outcome-note" readonly>${esc(recorded ? recorded.note : '')}</textarea></label><div class="impact-fields"><label>Bags collected<input id="impact-bags" type="number" value="${recorded && recorded.bags_collected !== null ? recorded.bags_collected : ''}" readonly></label><label>Volunteer minutes<input id="impact-minutes" type="number" value="${recorded && recorded.volunteer_minutes !== null ? recorded.volunteer_minutes : ''}" readonly></label></div><p class="notice">Self-reported by the organiser. Returns are counted separately from this report.</p>`
       : `<p class="muted">Finished your action? Record what you did. A returned tool does not complete an action.</p><label>Your outcome<textarea id="outcome-note" maxlength="500" placeholder="What did you do for your neighbourhood?"></textarea></label><div class="impact-fields"><label>Bags collected<input id="impact-bags" type="number" min="0" step="1" value=""></label><label>Volunteer minutes<input id="impact-minutes" type="number" min="0" step="5" value=""></label></div>${readiness && readiness.warning ? `<p class="notice">${esc(readiness.warning)}</p>` : ''}<button class="btn primary" id="complete-task" ${readiness && !readiness.canSubmit ? 'disabled' : ''}>Record completed action ↗</button><p class="muted">Completion is self-reported by the organiser.</p>`;
   const place = task
-    ? `<label>Where are we helping?<input id="place-name" value="${esc(task.place.name)}" maxlength="120" readonly></label><p class="notice">Meeting point saved with the action by the backend (within 2 km of ${esc(postcode())}).</p>`
+    ? `<label>Where are we helping?<input id="place-name" value="${esc(task.place.name)}" maxlength="120" readonly></label><p class="notice">Meeting point saved with the action by the backend (within 2 km of ${esc(homePostcode())}).</p>`
     : `<p class="notice">Nothing is saved until you pick an action. The meeting point is fixed to your community when the action is created.</p>`;
   return `<div class="page-heading"><span class="eyebrow">SMALL ACTIONS, SHARED POSSIBILITIES</span><h1>Let's make something <em>good.</em></h1><p>Choose an action and bring the right tools together.</p></div><div class="task-layout"><div><section class="panel"><h2>01 / Pick your little project</h2><div class="template-options">${templateButtons}</div>${place}</section><section class="panel"><h2>02 / Bring the tools together</h2>${slot('tasks', checklist)}</section></div><aside><section class="panel"><span class="eyebrow">EVERY STEP COUNTS</span><h2 style="margin-top:15px">03 / Tell the story</h2>${story}</section><section class="panel"><h2>Little actions, adding up.</h2>${slot('outcomes', impactPanel(report))}</section></aside></div>`;
 }
@@ -324,7 +375,7 @@ function loansPage() {
   return `<div class="page-heading"><span class="eyebrow">SHARED TOOLS. SHARED TRUST.</span><h1>A little give. A little <em>borrow.</em></h1><p>Keep track of the tools making good things happen.</p></div><div class="filters">${[['borrowed','I’m borrowing'],['lent','I’m lending']].map(([v,l])=>`<button class="chip ${ui.loanTab===v?'active':''}" data-loan-tab="${v}">${l}</button>`).join('')}</div><div class="timeline"><span>01 Request sent</span>→<span>02 Reservation accepted</span>→<span>03 Handed over</span>→<span>04 Return confirmed</span></div>${loans.length ? loans.map(l => {
     const isOwner = l.owner_id === me.id;
     const tool = toolOf(l.tool_id);
-    const postcodeOf = tool ? tool.community.postcode : postcode();
+    const postcodeOf = tool ? tool.community.postcode : homePostcode();
     const btn = (action, cls, label) => `<button class="btn ${cls} small" data-transition="${action}" data-id="${esc(l.id)}">${label}</button>`;
     let actions = '';
     if (l.status === 'pending') actions = isOwner
@@ -357,11 +408,9 @@ function render() {
 async function loginSubmit(form, btn) {
   const data = new FormData(form);
   const alias = String(data.get('user_alias') || '').trim();
-  const code = String(data.get('access_code') || '');
   if (!alias) { setLoginMessage('Choose a demo account.'); return; }
-  if (!code.trim()) { setLoginMessage('Enter the demo access code.'); return; }
   await action(btn, async () => {
-    const session = await client.login(alias, code);
+    const session = await client.login(alias);
     token = session.access_token;
     writeStore(TOKEN_KEY, token);
     writeStore(USER_KEY, JSON.stringify({ alias: session.user.alias, display_name: session.user.display_name }));
@@ -372,7 +421,11 @@ async function loginSubmit(form, btn) {
     ui.loading = false;
     render();
     toast(`Signed in as ${session.user.display_name}.`);
-  }, { ignoreAuth: true, onError: err => setLoginMessage(err && err.message ? err.message : 'Sign-in failed.') });
+  }, { ignoreAuth: true, onError: err => setLoginMessage(
+    err && err.code === 'UNAUTHENTICATED'
+      ? 'Unknown demo account. Pick Alice, Bob or Carol.'
+      : (err && err.message ? err.message : 'Sign-in failed.')
+  ) });
 }
 async function publishSubmit(form, btn) {
   const data = new FormData(form);
@@ -395,13 +448,42 @@ async function postcodeSubmit(form, btn) {
   if (!value) return;
   await action(btn, async () => {
     const community = await client.resolveCommunity(value);
-    const msg = $('#postcode-message');
-    if (msg) { msg.classList.remove('error'); msg.textContent = `${community.postcode} resolves to a community (${community.outcode}). Your demo account stays in ${postcode()}.`; }
-    toast(`That postcode is real: ${community.postcode}.`);
+    const home = homeCommunity();
+    // Checking the postcode you already live in just returns to home context.
+    if (home && community.id === home.id && community.postcode === home.postcode) {
+      const wasBrowsing = !!state.browse;
+      state.browse = null; state.browseTools = null; state.browseEnvironment = null;
+      if (wasBrowsing) await refresh();
+      render();
+      toast(wasBrowsing ? `Back to your street: ${home.postcode}.` : `${home.postcode} is already your home street.`);
+      return;
+    }
+    // Browse that community: pull ITS environment card and tool list, then
+    // repaint the community home page from them.
+    const [environment, tools] = await Promise.all([
+      client.communityEnvironment(community.id),
+      client.listTools({ community_id: community.id, radius_m: 2000, limit: 100 })
+    ]);
+    state.browse = community;
+    state.browseEnvironment = environment;
+    state.browseTools = tools;
+    buildNames();
+    render();
+    toast(`Browsing ${community.postcode}. Your lending home stays ${homePostcode()}.`);
   }, { onError: err => {
+    // 422 INVALID_POSTCODE (or a network failure): keep the message verbatim
+    // under the box and leave the current browse context alone.
     const msg = $('#postcode-message');
     if (msg) { msg.textContent = err.message; msg.classList.add('error'); }
   } });
+}
+async function backToHome(btn) {
+  await action(btn, async () => {
+    state.browse = null; state.browseTools = null; state.browseEnvironment = null;
+    await refresh();   // re-pull the home community's environment + tools
+    render();
+    toast(`Back to your street: ${homePostcode()}.`);
+  });
 }
 async function chooseTemplate(templateId, btn) {
   const open = myOpenTask();
@@ -424,7 +506,7 @@ async function chooseTemplate(templateId, btn) {
   });
 }
 async function borrow(toolId, requirementId, btn) {
-  const tool = state.tools.find(t => t.id === toolId);
+  const tool = visibleTools().find(t => t.id === toolId) || state.tools.find(t => t.id === toolId);
   if (!tool || tool.availability !== 'available') { toast('This tool is no longer available to request.'); render(); return; }
   if (state.me && tool.owner.id === state.me.id) { toast('That is your own tool — a neighbour has to borrow it.'); return; }
   await action(btn, async () => {
@@ -495,7 +577,7 @@ document.addEventListener('click', e => {
   if (el.matches('[data-publish]')) {
     const owner = $('#publish-owner'), pc = $('#publish-postcode');
     if (owner) owner.textContent = state.me ? nameOf(state.me.id) : '';
-    if (pc) pc.textContent = postcode();
+    if (pc) pc.textContent = homePostcode();
     const dlg = $('#publish-dialog'); if (dlg) dlg.showModal();
     return;
   }
@@ -506,6 +588,7 @@ document.addEventListener('click', e => {
   if (el.dataset.template) { chooseTemplate(el.dataset.template, el); return; }
   if (el.id === 'integration-open') { const d = $('#integration-dialog'); if (d) d.showModal(); return; }
   if (el.id === 'retry-boot') { boot(); return; }
+  if (el.id === 'back-home') { backToHome(el); return; }
   if (el.id === 'logout') { signOut(el); return; }
   if (el.id === 'complete-task') { completeTask(el); return; }
 });

@@ -6,20 +6,6 @@ import os
 from dataclasses import dataclass
 from functools import lru_cache
 
-# Placeholder access codes that must never be used in a running server.
-_PLACEHOLDER_CODES = {
-    "",
-    "change-me",
-    "changeme",
-    "placeholder",
-    "secret",
-    "access-code",
-    "demo",
-}
-
-MIN_ACCESS_CODE_LENGTH = 16
-
-
 class SettingsError(RuntimeError):
     """Raised when configuration is missing or unsafe. Prevents startup."""
 
@@ -27,30 +13,8 @@ class SettingsError(RuntimeError):
 @dataclass(frozen=True)
 class Settings:
     app_mode: str
-    demo_access_code: str
     database_path: str
     session_ttl_hours: int
-
-
-def _read_access_code() -> str:
-    code = os.environ.get("DEMO_ACCESS_CODE", "")
-    stripped = code.strip()
-    if not stripped:
-        raise SettingsError(
-            "DEMO_ACCESS_CODE is required and must not be empty. "
-            "Set a runtime value of at least 16 characters (see .env.example)."
-        )
-    if stripped.lower() in _PLACEHOLDER_CODES:
-        raise SettingsError(
-            "DEMO_ACCESS_CODE is a placeholder value and must be changed "
-            "before startup."
-        )
-    if len(stripped) < MIN_ACCESS_CODE_LENGTH:
-        raise SettingsError(
-            f"DEMO_ACCESS_CODE must be at least {MIN_ACCESS_CODE_LENGTH} "
-            "characters long."
-        )
-    return stripped
 
 
 @lru_cache(maxsize=1)
@@ -60,9 +24,9 @@ def get_settings() -> Settings:
         raise SettingsError(
             f"APP_MODE must be 'demo' or 'production', got {app_mode!r}."
         )
-    # The access code is always validated: a production deploy must not fall
-    # back to a demo secret even if demo routes are disabled.
-    demo_access_code = _read_access_code()
+    # No access code gate anymore (user override of spec 4.1): demo login is
+    # open by design. Real authentication is still missing, so production mode
+    # must not start.
     if app_mode == "production":
         raise SettingsError(
             "APP_MODE=production is not supported: real authentication is not "
@@ -83,7 +47,6 @@ def get_settings() -> Settings:
         raise SettingsError("SESSION_TTL_HOURS must be >= 1.")
     return Settings(
         app_mode=app_mode,
-        demo_access_code=demo_access_code,
         database_path=database_path,
         session_ttl_hours=session_ttl_hours,
     )

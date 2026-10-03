@@ -417,8 +417,8 @@ def test_environment_demo_fixture_fallback_when_upstream_down(
             "INSERT INTO communities (id, postcode, outcode, latitude, longitude, "
             "country, source, source_kind, fetched_at, created_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            ("c9999999-9999-4999-8999-999999999999", "EH14 4AS", "EH14",
-             55.9092, -3.3193, "Scotland", "fixture", "fixture", now, now),
+            ("c9999999-9999-4999-8999-999999999999", "EH8 9YL", "EH8",
+             55.9443, -3.1880, "Scotland", "fixture", "fixture", now, now),
         )
 
     _mock_upstream_down(monkeypatch)
@@ -432,21 +432,21 @@ def test_environment_demo_fixture_fallback_when_upstream_down(
     carbon = data["carbon_intensity"]
     assert carbon["status"] == "ok"
     assert carbon["source_kind"] == "fixture"
-    assert carbon["data"]["index"] == "very low"
-    assert carbon["data"]["forecast"] == 38
+    assert carbon["data"]["index"] == "low"
+    assert carbon["data"]["forecast"] == 40
     assert "fixture" in carbon["attribution"].lower()
     assert carbon["source_url"] == "https://carbon-intensity.github.io/api-definitions/"
 
     air = data["air_quality"]
     assert air["status"] == "ok"
     assert air["source_kind"] == "fixture"
-    assert air["data"]["aqi"] == 19
-    assert air["data"]["status"] == "Good"
+    assert air["data"]["aqi"] == 26
+    assert air["data"]["status"] == "Fair"
 
     green = data["greenspace"]
     assert green["status"] == "ok"
     assert green["source_kind"] == "fixture"
-    assert green["data"][0]["name"] == "Riccarton Estate & Campus Loch"
+    assert green["data"][0]["name"] == "George Square Gardens"
     assert "OpenStreetMap" in green["attribution"]
 
     # All three providers healthy on fixture data -> overall ok.

@@ -11,12 +11,13 @@
  */
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { createApp, ACCESS_CODE } = require('./harness.cjs');
+const { createApp } = require('./harness.cjs');
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-async function signIn(app, alias, code) {
-  app.submit('#login-form', { user_alias: alias, access_code: code === undefined ? ACCESS_CODE : code });
+/* Demo sign-in is alias-only: no access code is asked for or sent. */
+async function signIn(app, alias) {
+  app.submit('#login-form', { user_alias: alias });
   await app.flush();
 }
 async function signOut(app) {
@@ -31,12 +32,13 @@ test('bob lends, alice borrows: the full story through the real API client', asy
   /* ---- 0. signed out: the login panel is the whole app ---- */
   assert.match(app.html(), /DEMO ACCOUNTS/, 'no token means no data, only a sign-in form');
   assert.match(app.html(), /demo account/, 'the demo accounts are named');
+  assert.ok(!app.html().includes('access_code'), 'no access-code field: the demo sign-in is alias-only');
   assert.equal(app.run('state.me'), null, 'viewing the page must not invent a session');
 
-  /* ---- 1. wrong access code -> the server message, form untouched ---- */
-  await signIn(app, 'bob', 'definitely-not-the-code');
+  /* ---- 1. an unknown alias -> the server message, form untouched ---- */
+  await signIn(app, 'mallory');
   assert.match(app.html(), /DEMO ACCOUNTS/, 'a failed sign-in stays on the form');
-  assert.equal(app.element('#login-message').textContent, 'Authentication required.');
+  assert.equal(app.element('#login-message').textContent, 'Unknown demo account. Pick Alice, Bob or Carol.');
   assert.equal(app.stored.has('bnd.token'), false, 'nothing is stored for a failed sign-in');
 
   /* ---- 2. bob signs in ---- */

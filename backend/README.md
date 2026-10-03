@@ -71,20 +71,27 @@ python3.13 -m venv .venv
 
 ### 2. 配置环境变量
 
-复制 `.env.example` 到你的 shell / 进程管理器并填入真实值。`DEMO_ACCESS_CODE` 必填：至少 16 字符，空值、占位值（change-me / placeholder 等）或短于 16 字符都会导致启动失败。该访问码由团队运行时配置，不写入源码、种子数据或本文档。
+复制 `.env.example` 到你的 shell / 进程管理器并按需填值。**不需要任何访问码**
+（演示访问码已按用户决策移除，见 `docs/DECISIONS.md` 第 10 节）：`DEMO_ACCESS_CODE`
+不存在于配置中，即使环境里残留该变量也会被后端忽略，不会导致启动失败。
 
 ### 3. 启动服务器
 
 ```bash
-DEMO_ACCESS_CODE=<团队访问码> ./scripts/dev_server.sh
+./scripts/dev_server.sh
 ```
 
-`scripts/dev_server.sh` 实际执行：切换到 `backend/` → 校验 `DEMO_ACCESS_CODE` 非空 → 默认 `APP_MODE=demo`、`DATABASE_PATH=./var/borrow-next-door.sqlite3` → 运行 `scripts/reset_db.py`（幂等：迁移 + 种子）→ `exec .venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 1`。
+> 注意：`scripts/dev_server.sh` 与 `scripts/check_api.sh` 尚未同步本次改动，
+> 仍会先检查 `DEMO_ACCESS_CODE` 是否设置（本次授权的文件范围不含这两个脚本）。
+> 绕过办法：`DEMO_ACCESS_CODE=dummy ./scripts/dev_server.sh`（该值不会被后端读取）。
+> 最省事的启动方式是仓库根目录的 `./start.sh`（已移除访问码相关逻辑）。
+
+`scripts/dev_server.sh` 实际执行：切换到 `backend/` → 检查 `DEMO_ACCESS_CODE` 非空（遗留，值被后端忽略）→ 默认 `APP_MODE=demo`、`DATABASE_PATH=./var/borrow-next-door.sqlite3` → 运行 `scripts/reset_db.py`（幂等：迁移 + 种子）→ `exec .venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 1`。
 
 也可以直接调用 uvicorn（数据库已存在时）：
 
 ```bash
-DEMO_ACCESS_CODE=<团队访问码> .venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 1
+.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 1
 ```
 
 启动后：
@@ -97,7 +104,6 @@ DEMO_ACCESS_CODE=<团队访问码> .venv/bin/uvicorn app.main:app --host 127.0.0
 | 变量 | 必填 | 默认值 | 说明 |
 |---|---|---|---|
 | `APP_MODE` | 否 | `demo` | 仅接受 `demo` / `production`。`production` 当前拒绝启动（真实认证未实现，规格 4.1）。 |
-| `DEMO_ACCESS_CODE` | 是 | 无 | 团队共享演示访问码，≥16 字符；占位值拒绝启动。由团队运行时配置，不写入源码。 |
 | `DATABASE_PATH` | 否 | `./var/borrow-next-door.sqlite3` | sqlite 文件路径，相对 `backend/` 或绝对路径。 |
 | `SESSION_TTL_HOURS` | 否 | `12` | 演示会话有效期（小时），≥1。 |
 
@@ -115,7 +121,7 @@ DEMO_ACCESS_CODE=<团队访问码> .venv/bin/uvicorn app.main:app --host 127.0.0
 
 种子数据包含三个演示身份（均属于社区 `EH8 9AB`）：`alice`、`bob`、`carol`。
 
-这些是**演示账号，不是真实注册**：不存密码，不代表已验证居民身份。登录方式是 `POST /api/v1/demo/sessions`，传 `user_alias` + 团队 `DEMO_ACCESS_CODE`，成功返回 Bearer token（服务端只存 SHA-256 摘要）。任何界面与文档都应标注 "demo account"。
+这些是**演示账号，不是真实注册**：不存密码，不代表已验证居民身份。登录方式是 `POST /api/v1/demo/sessions`，**只传 `user_alias`**，成功返回 Bearer token（服务端只存 SHA-256 摘要）。不需要访问码（已按用户决策移除）；旧客户端多传的 `access_code` 字段会被直接忽略。任何界面与文档都应标注 "demo account"。
 
 ## 健康检查与接口文档
 
@@ -140,7 +146,7 @@ DEMO_ACCESS_CODE=<团队访问码> .venv/bin/uvicorn app.main:app --host 127.0.0
 
 ## 安全提示
 
-- `DEMO_ACCESS_CODE` 由团队运行时配置（环境变量 / 进程管理器），不写入源码、种子、日志或文档。
-- 登录失败统一返回 401；同一 IP 每分钟 10 次失败后返回 429 `RATE_LIMITED`（进程内计数）。
+- 演示登录**无访问码门禁**（`DEMO_ACCESS_CODE` 已移除，`.env.example` 中也无该条目）；本地演示按「无门禁」设计运行，接入真实认证前 `APP_MODE=production` 仍拒绝启动。
+- 未知 / 未激活 alias 登录统一返回 401；同一 IP 每分钟超过 60 次登录请求返回 429 `RATE_LIMITED`（进程内计数的宽松防刷上限，替代原「10 次失败」限制）。
 - Bearer token 为 ≥32 随机字节的 opaque 字符串，服务端只保存 SHA-256 摘要与到期/注销时间。
-- 错误响应不回显 `access_code`、`Authorization` 或原始敏感输入，不含堆栈、SQL 或磁盘路径。
+- 错误响应不回显 `Authorization` 或原始敏感输入，不含堆栈、SQL 或磁盘路径。

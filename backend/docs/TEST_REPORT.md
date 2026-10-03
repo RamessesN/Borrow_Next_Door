@@ -210,7 +210,7 @@ POST /api/v1/demo/sessions (public) -> 201
 2. **非列表响应的 meta**：`EnvelopeMeta` 中 `limit/offset/total` 为 `int | None = None`；单对象与错误 envelope 只填 `request_id`，三个分页字段在运行时省略（等价于 null），列表 envelope 才填实值。
 3. **事件 action 词表与 id 形态**：`loan_events.action` 使用规格 6.1 的过去式事件词（`accepted` / `rejected` / `cancelled` / `handed_over` / `returned`），与请求端点动作名（`accept` / `reject` / `cancel` / `hand-over` / `return`）一一对应；事件 id 由 `new_event_id()` 生成 UUIDv7 形态（48 位毫秒时间戳 + 14 位单调序列），原因是规格 8.2 要求事件按 `(created_at, id)` 排序而 `created_at` 只有秒级分辨率，id 必须自带时间序。
 4. **C 的三个适配器是空壳**：`app/adapters/carbon.py`、`air.py`、`greenspace.py` 返回 `status="not_implemented"` 且**从不发外部 HTTP**，真实外呼未经本次测试（见 3.5）。`app/adapters/postcode.py` 为 B 侧最小实现/固定 fixture 路径，真实 postcodes.io 联调未测。
-5. **DEMO_ACCESS_CODE 为运行时配置**：源码与本报告均不含任何访问码；本次所有验证使用测试值 `test-only-access-code-0001`（仅测试环境，`APP_MODE=demo`）。生产模式启动会被 `app.config` 拒绝。
+5. **演示访问码已移除**（2026-10-03 用户决策，见 DECISIONS.md「移除演示访问码」）：源码、测试与本报告均不含任何访问码，`DEMO_ACCESS_CODE` 环境变量不再被读取；本报告 1–5 节中早于该决策的记录（含第 66 行命令里的 `DEMO_ACCESS_CODE=...`）保留为历史原文。`APP_MODE=production` 启动仍被 `app.config` 拒绝。本次改动的实测记录见第 6 节。
 
 ## 5. 未覆盖范围
 
@@ -218,3 +218,78 @@ POST /api/v1/demo/sessions (public) -> 201
 - 前端集成（A 侧）与跨模块联调
 - 负载 / 性能 / 压测、长时间稳定性
 - 真实注册与真实令牌体系（MVP 仅 demo 会话，规格已声明限制）
+
+## 6. 移除演示访问码后的实测记录（2026-10-03）
+
+用户明确覆盖规格 4.1：**彻底移除 DEMO_ACCESS_CODE**，登录只需 `user_alias`。
+以下三项均为本次真实执行的原始输出。
+
+### 6.1 无 DEMO_ACCESS_CODE 环境变量下 uvicorn 启动并登录（201）
+
+```
+$ cd backend && env -u DEMO_ACCESS_CODE -u APP_MODE APP_MODE=demo \
+    DATABASE_PATH=./var/borrow-next-door.sqlite3 \
+    .venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8077 &
+$ for i in $(seq 1 40); do curl -sf http://127.0.0.1:8077/health/ready >/dev/null 2>&1 && { echo READY; break; }; sleep 0.5; done
+READY
+$ curl -s http://127.0.0.1:8077/health/ready
+{"data":{"status":"ready"},"meta":{"request_id":"67a277ba-e972-4f65-b5d3-bb71159f0912",...}}
+
+$ curl -s -o /tmp/login_resp.json -w "HTTP %{http_code}\n" -X POST \
+    http://127.0.0.1:8077/api/v1/demo/sessions \
+    -H "Content-Type: application/json" -d '{"user_alias":"alice"}'
+HTTP 201
+{"data":{"access_token":"7-UPE6WvuXNdcMCwg9jVKkSSsF3fXJTxtuJuQ2zOKWM","token_type":"bearer",
+ "expires_at":"2026-10-04T01:08:30Z","user":{"id":"u1111111-1111-4111-8111-111111111111",
+ "alias":"alice","display_name":"Alice","community_id":"c1111111-1111-4111-8111-111111111111"}},
+ "meta":{"request_id":"a00fd30a-7752-4088-830a-b4517a98e095",...}}
+```
+
+附带实测（同一进程）：带无关注键 `access_code` 的旧客户端请求同样 201（字段被忽略），
+未知 alias 仍 401：
+
+```
+$ curl -s -w "HTTP %{http_code}\n" -X POST http://127.0.0.1:8077/api/v1/demo/sessions \
+    -H "Content-Type: application/json" -d '{"user_alias":"bob","access_code":"whatever"}'
+HTTP 201   # data.user.alias = "bob"
+$ curl -s -w "HTTP %{http_code}\n" -X POST http://127.0.0.1:8077/api/v1/demo/sessions \
+    -H "Content-Type: application/json" -d '{"user_alias":"mallory"}'
+{"error":{"code":"UNAUTHENTICATED","message":"Authentication required.","details":{}},...}HTTP 401
+$ tail -5 /tmp/uv_acc_test.log
+INFO:     Uvicorn running on http://127.0.0.1:8077 (Press CTRL+C to quit)
+INFO:     127.0.0.1:49678 - "POST /api/v1/demo/sessions HTTP/1.1" 201 Created
+INFO:     127.0.0.1:49679 - "POST /api/v1/demo/sessions HTTP/1.1" 201 Created
+INFO:     127.0.0.1:49680 - "POST /api/v1/demo/sessions HTTP/1.1" 401 Unauthorized
+```
+
+### 6.2 全量测试套件
+
+```
+$ .venv/bin/pytest -q
+202 passed, 1 warning in 3.14s
+```
+
+（改动前基线为 `201 passed`；删除访问码相关用例、新增无访问码/被忽略字段/宽松限流用例后
+净增 1 个。warning 仍是与业务无关的 `starlette.testclient` 弃用提示。）
+
+### 6.3 `./start.sh --help`
+
+```
+$ ./start.sh --help
+Borrow Next Door — one-command demo launcher
+
+Starts the backend (FastAPI :8000) and the frontend (:5173) together,
+prepares everything from a fresh clone and opens the app in your browser.
+Ctrl+C stops both. No access code is required to sign in.
+
+  ./start.sh            # normal start (creates venv/DB on first run)
+  ./start.sh --reset    # also rebuild the demo database
+  ./start.sh --help
+
+Windows: run inside WSL/Git-Bash, or start the two processes manually
+(see README.md).
+```
+
+`start.sh` 已删除访问码的生成、长度校验与横幅打印（原「Demo access code: …」一行）；
+启动横幅现在只提示用 alice / bob / carol 登录，无访问码行。
+

@@ -196,10 +196,13 @@
       /* ---- auth ---- */
       // Login and logout do not take an Idempotency-Key (spec: auth routes are
       // outside the business idempotency store).
-      login: function (userAlias, accessCode) {
+      // Demo sign-in is alias-only: the backend takes {user_alias} and does
+      // not ask for an access code. (A stray second argument is ignored so
+      // older callers keep working.)
+      login: function (userAlias) {
         return request('/demo/sessions', {
           method: 'POST',
-          body: { user_alias: userAlias, access_code: accessCode },
+          body: { user_alias: userAlias },
           auth: false,
           idempotent: false
         }).then(function (data) {

@@ -25,16 +25,16 @@
 ## 2. APP_MODE=production 拒绝启动的原因
 
 规格 4.1：「未实现真实认证时，`APP_MODE=production` 应拒绝启动，不能偷偷沿用演示身份。」
-当前只有受访问码保护的演示会话（种子用户 alice/bob/carol），没有密码/注册/OAuth 等真实认证。若允许 production 模式启动，任何持访问码者即可冒充任意演示身份，等同于无认证。因此 `app/config.py` 在 `APP_MODE=production` 时抛 `SettingsError`，`app/main.py` 启动即失败并给出明确信息。接入真实认证后应移除此开关并补充相应测试。
+当前只有无门禁的演示会话（种子用户 alice/bob/carol），没有密码/注册/OAuth 等真实认证。若允许 production 模式启动，任何人即可冒充任意演示身份，等同于无认证。因此 `app/config.py` 在 `APP_MODE=production` 时抛 `SettingsError`，`app/main.py` 启动即失败并给出明确信息。接入真实认证后应移除此开关并补充相应测试。
 
-另外，无论模式如何，`DEMO_ACCESS_CODE` 缺失、占位值（change-me / placeholder 等）或短于 16 字符都直接启动失败，避免弱口令上线。
+> 变更（2026-10-03）：原「`DEMO_ACCESS_CODE` 缺失/占位/过短即启动失败」的校验已随访问码功能一并删除，见第 10 节。`APP_MODE=production` 拒绝启动这一条保留。
 
 ## 3. 演示身份不是真实注册
 
 - `POST /api/v1/demo/sessions` 只接受已存在于种子数据的 alias（alice / bob / carol），客户端不能传任意 `user_id` 创建身份。
 - `users` 表不存密码；会话表只存 token 的 SHA-256 摘要 + 创建/到期/注销时间。token 为 `secrets.token_urlsafe(32)`（≥32 随机字节）。
 - 演示账号仅用于比赛演示，任何界面/文档标注 "demo account"，不代表已验证居民身份。
-- 访问码由运行时环境变量注入（见 `.env.example`），不写入源码、不写入种子数据。
+- （已废止，见第 10 节）~~访问码由运行时环境变量注入（见 `.env.example`），不写入源码、不写入种子数据。~~ 演示访问码已于 2026-10-03 移除，登录不再需要任何访问码。
 
 ## 4. 共享契约摘要（所有并行任务必须遵守）
 
@@ -177,3 +177,46 @@ docs/TEST_REPORT.md 第 4 节）。
   Overpass 真实 payload 形状的解析、畸形 payload 与网络异常降级、AQI 分级
   边界、top-5 截断、haversine 参考值、postcode 200/404/500/异常路径。
 - 全量 `.venv/bin/pytest -q`：201 passed（基线 156，总数未减少）。
+
+## 10. 移除演示访问码（2026-10-03，用户决策，覆盖规格 4.1）
+
+**决策**：用户明确要求彻底移除 `DEMO_ACCESS_CODE` 功能——登录不再需要任何访问码。
+本条是对原规格 4.1 的明确覆盖，以用户说明为准。
+
+**原 4.1 的设计意图与现在的位置**：
+
+- 原设计意图是**防滥用 + 强制诚实的演示身份**——登录必须持有团队运行时空投的访问码，
+  避免陌生人随手冒充演示身份，也避免把演示环境当成公开注册服务。
+- 现在改为**本地演示无门禁**：项目在本机 `./start.sh` 下自用，访问码只增加摩擦
+  （要生成、传递、印在横幅上），没有对应的真实防护价值；`web/` 侧与文档也无需再同步这个秘密。
+- **演示身份仍然是 demo account，不是真实注册**：`users` 表不存密码、不能自助注册，
+  只有种子 alias（alice / bob / carol），界面与文档仍须标注 "demo account"，不代表已验证居民身份。
+  这一点与访问码是否存在无关，保持不变。
+- `APP_MODE=production` 仍拒绝启动（真实认证未实现），保留。
+
+**实现要点**：
+
+- `app/config.py`：删除 `_PLACEHOLDER_CODES`、`MIN_ACCESS_CODE_LENGTH`、`_read_access_code()`
+  与 `Settings.demo_access_code` 字段；缺失、空值、占位、过短都不再影响启动。
+  仍校验 `APP_MODE` ∈ {demo, production}、`DATABASE_PATH` 非空、`SESSION_TTL_HOURS >= 1`。
+- `app/routers/auth.py`：`DemoLoginRequest.access_code` 改为**可选字段并直接忽略**
+  （`str | None = None`），兼容旧客户端不报 422；`extra="forbid"` 保持，未知键仍 422。
+  成功仍 201 返回 `access_token / token_type / expires_at / user`。
+- `app/auth.py`：删除 `verify_access_code()` 与常数时间比较；`create_demo_session(alias, ip)`
+  只校验 alias 存在且激活。**限流改为对 demo 登录 POST 本身的宽松每 IP 限制：
+  60 次/分钟**——取「宽松限流」这一选项，理由：访问码失败计数已失去语义（不再有凭证失败），
+  而登录端点现在完全无门禁，保留一个远高于正常使用量的上限即可挡住廉价刷接口，
+  同时不会误伤本地演示（正常一次会话只登录 1–2 次）。token 生成/哈希/会话/注销/
+  `get_current_user` 逻辑不变。
+- `start.sh`：删除访问码的生成、长度校验与横幅打印；启动流程其余不变
+  （venv、依赖、数据库、双端、Ctrl+C），横幅只提示 alice / bob / carol。
+- 测试：`conftest.py` 删除 `TEST_ACCESS_CODE`，`login()` 只传 `user_alias`；
+  `tests/test_health_auth.py` 改写为「无 `DEMO_ACCESS_CODE` 也能启动与登录」
+  「带无关注键 `access_code` 也成功」「未知 alias 仍 401」「注销后 401」「无 token 401」
+  「`X-User-Id` 伪造无效」「60 次/分钟后 429」。
+- 文档：`README.md`、`.env.example` 删除该环境变量条目；`API_SAMPLES.md` 登录示例
+  只发 `user_alias` 并注明可选且被忽略；`TEST_REPORT.md` 追加本次实测记录。
+
+**已知遗留（不在本次授权文件范围内，未改动）**：
+`scripts/dev_server.sh`、`scripts/check_api.sh` 仍要求设置 `DEMO_ACCESS_CODE` 才能运行，
+其发送的 `access_code` 现在会被后端忽略（check_api.sh 仍可跑通，但需先随手设一个值）。
