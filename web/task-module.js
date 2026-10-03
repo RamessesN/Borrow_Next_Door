@@ -139,6 +139,12 @@
     return raw;
   }
 
+  /** "EH8 9YL" -> "EH8". Member C naturally holds outcodes, not full postcodes,
+   *  so `nearbyPostcodes` accepts either and this makes both work. */
+  function outwardCode(value) {
+    return normalisePostcode(value).split(' ')[0];
+  }
+
   function isNumber(value) {
     return typeof value === 'number' && isFinite(value);
   }
@@ -328,8 +334,9 @@
    *   1. right category, status `available` (reserved / on_loan are never offered)
    *   2. never the viewer's own tool
    *   3. neighbours first: same postcode wins outright; if none, accept the
-   *      explicitly supplied `nearbyPostcodes`; other postcodes never surface,
-   *      because "nearby" must be a decision member C's data makes for us.
+   *      explicitly supplied `nearbyPostcodes` (a full postcode or an outcode
+   *      such as "EH7"); other postcodes never surface, because "nearby" must
+   *      be a decision member C's data makes for us.
    *
    * Returns descriptors, not tools, so the UI can label the tier and the
    * (approximate, straight-line) distance honestly.
@@ -349,7 +356,7 @@
       var postcode = normalisePostcode(tool.postcode);
       var tier = 'elsewhere';
       if (taskPostcode && postcode === taskPostcode) tier = 'same_postcode';
-      else if (nearby.indexOf(postcode) !== -1) tier = 'nearby';
+      else if (nearby.indexOf(postcode) !== -1 || nearby.indexOf(outwardCode(postcode)) !== -1) tier = 'nearby';
 
       var distanceKm = null;
       if (isNumber(tool.latitude) && isNumber(tool.longitude) &&
@@ -786,14 +793,38 @@
   /* ------------------------------------------------------------------ loans */
 
   /**
+   * Whether a slot already has a live (pending / accepted / on_loan) request.
+   *
+   * Runs the same claim pass as the checklist, so the guard and the UI can never
+   * disagree. Critically, a *returned* or *rejected* request must NOT keep
+   * locking the slot: borrowing the same tool twice is a first-class case in the
+   * brief, so the historical pointer on the slot is not proof of a live claim.
+   *
+   * Without loan data this falls back to trusting the stored pointer, which is
+   * the conservative answer.
+   */
+  function slotIsClaimed(task, requirement, context) {
+    if (!requirement) return false;
+    var loans = context && context.loans;
+    if (!Array.isArray(loans)) return !!requirement.loan_request_id;
+    var toolById = indexById((context && context.tools) || []);
+    var taskLoans = loans.filter(function (l) { return l.task_id === task.id; });
+    var claims = claimLoans(task.requirements || [], taskLoans, toolById);
+    return (claims.get(requirement.id) || []).some(function (i) {
+      return LOAN_ACTIVE.indexOf(i.request.status) !== -1;
+    });
+  }
+
+  /**
    * Build a loan request for one slot. Member B owns the server-side
    * atomicity; this mirrors the same guard client-side so the button can be
-   * disabled honestly before the round trip.
+   * disabled honestly before the round trip. Pass `context` ({tools, loans}) so
+   * the slot guard can tell a live claim from a finished one.
    */
-  function createLoanRequest(tool, task, requirement, borrowerId, makeId) {
+  function createLoanRequest(tool, task, requirement, borrowerId, makeId, context) {
     if (!tool || tool.status !== 'available') return { ok: false, reason: 'tool_unavailable' };
     if (requirement && requirement.source_type === 'self') return { ok: false, reason: 'slot_is_self_provided' };
-    if (requirement && requirement.loan_request_id) return { ok: false, reason: 'slot_already_claimed' };
+    if (slotIsClaimed(task, requirement, context)) return { ok: false, reason: 'slot_already_claimed' };
     var id = makeId || defaultId;
     var request = {
       id: id(),
@@ -824,6 +855,7 @@
     DISCLAIMER: DISCLAIMER,
     // helpers
     normalisePostcode: normalisePostcode,
+    outwardCode: outwardCode,
     categoryLabel: categoryLabel,
     haversineKm: haversineKm,
     emptyImpact: emptyImpact,
@@ -850,6 +882,7 @@
     outcomeReadiness: outcomeReadiness,
     // loans
     createLoanRequest: createLoanRequest,
+    slotIsClaimed: slotIsClaimed,
     // used by tests that want a stable clone
     clone: clone
   };

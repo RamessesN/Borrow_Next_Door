@@ -42,31 +42,6 @@ function toolCards(){const tools=state.tools.filter(t=>t.postcode===postcode&&t.
 /* =============================================================================
  * Member D: action checklist, tool matching and impact panel.
  * All decision logic lives in web/task-module.js; this file only renders it.
- * ========================================================================== */
-function taskContext(task){return {tools:state.tools,loans:state.loans,names,viewerId:user,task};}
-function surveyValue(value){return value==='true'?true:value==='false'?false:null;}
-function requirementRow(row){
-  const own=row.loans.slice().sort((a,b)=>b.stageOrder-a.stageOrder)[0];
-  const slotNote=row.slotTotal>1?` · ${row.slot} of ${row.slotTotal}`:'';
-  const locked=row.pending||(row.confirmed&&row.sourceType==='loan');
-  const request=!row.confirmed&&!row.pending&&row.tools.length
-    ?`<button class="btn secondary small" data-borrow="${esc(row.tools[0].toolId)}" data-req="${esc(row.requirementId)}">Request from ${esc(row.tools[0].ownerName)}</button>`
-    :'';
-  const others=row.state==='available'&&row.tools.length>1?`<small class="muted">${row.tools.length} neighbours could help</small>`:'';
-  const mark=row.confirmed?'✓ ':row.state==='available'?'↗ ':row.pending?'⋯ ':'○ ';
-  return `<div class="requirement state-${row.state}"><div><b>${esc(row.label)}${slotNote}</b><small>${mark}${esc(row.statusText)}</small>${own?`<span class="pill">${esc(own.stageLabel)} · ${esc(own.toolName)}</span>`:''}${others}</div><div class="req-actions">${request}<label><input type="checkbox" data-self="${esc(row.requirementId)}" ${row.sourceType==='self'?'checked':''} ${locked?'disabled':''}> I'll bring my own</label></div></div>`;
-}
-function wantedStrip(board){
-  if(!board.length)return '';
-  return `<div class="wanted-strip"><span class="eyebrow">NEIGHBOURS NEEDED</span><div class="wanted-tags">${board.map(e=>`<span class="chip">${esc(e.label)} · ${e.slots}</span>`).join('')}</div><small>Each of these is a slot a neighbour could fill today. Publishing one tool can unlock an action for everyone.</small></div>`;
-}
-function impactPanel(report){
-  const cells=report.metrics.map(m=>`<div class="impact-metric ${m.available?'':'pending'}"><strong>${m.available?m.value:'—'}</strong><small>${esc(m.label)}</small><span class="status-tag">${m.available?esc(m.basis):'Not collected yet'}</span></div>`).join('');
-  return `<div class="outcomes">${cells}</div><p class="notice">${esc(report.disclaimer)}</p><p class="muted">Scope: ${esc(report.scope)}. Demo records in this browser only.</p>`;
-}
-/* =============================================================================
- * Member D: action checklist, tool matching and impact panel.
- * All decision logic lives in web/task-module.js; this file only renders it.
  *
  * Rendering never creates state. A task row only appears once somebody picks
  * an action or acts on a slot, so viewing the page cannot invent work for
@@ -81,9 +56,13 @@ function requirementRow(row){
   const request=!row.confirmed&&!row.pending&&row.tools.length
     ?`<button class="btn secondary small" data-borrow="${esc(row.tools[0].toolId)}" data-req="${esc(row.requirementId)}">Request from ${esc(row.tools[0].ownerName)}</button>`
     :'';
-  const others=row.state==='available'&&row.tools.length>1?`<small class="muted">${row.tools.length} neighbours could help</small>`:'';
+  const top=row.tools[0];
+  const notes=[];
+  if(top&&top.distanceKm!==null&&top.distanceKm!==undefined)notes.push(`about ${top.distanceKm} km away, straight line`);
+  if(row.state==='available'&&row.tools.length>1)notes.push(`${row.tools.length} neighbours could help`);
+  const note=notes.length?`<small class="muted">${esc(notes.join(' · '))}</small>`:'';
   const mark=row.confirmed?'✓ ':row.state==='available'?'↗ ':row.pending?'⋯ ':'○ ';
-  return `<div class="requirement state-${row.state}"><div><b>${esc(row.label)}${slotNote}</b><small>${mark}${esc(row.statusText)}</small>${own?`<span class="pill">${esc(own.stageLabel)} · ${esc(own.toolName)}</span>`:''}${others}</div><div class="req-actions">${request}<label><input type="checkbox" data-self="${esc(row.requirementId)}" ${row.sourceType==='self'?'checked':''} ${locked?'disabled':''}> I'll bring my own</label></div></div>`;
+  return `<div class="requirement state-${row.state}"><div><b>${esc(row.label)}${slotNote}</b><small>${mark}${esc(row.statusText)}</small>${own?`<span class="pill">${esc(own.stageLabel)} · ${esc(own.toolName)}</span>`:''}${note}</div><div class="req-actions">${request}<label><input type="checkbox" data-self="${esc(row.requirementId)}" ${row.sourceType==='self'?'checked':''} ${locked?'disabled':''}> I'll bring my own</label></div></div>`;
 }
 function wantedStrip(board){
   if(!board.length)return '';
@@ -125,7 +104,7 @@ function borrow(id,requirementId){
     const claimed=state.loans.some(l=>l.task_id===task.id&&D.LOAN_ACTIVE.includes(l.status)&&state.tools.find(x=>x.id===l.tool_id)?.category===t.category);
     if(claimed){toast('You already have an active request for this tool category.');return;}
   }
-  const result=D.createLoanRequest(t,task,slot,user,uid);
+  const result=D.createLoanRequest(t,task,slot,user,uid,{loans:state.loans,tools:state.tools});
   if(!result.ok){toast({tool_unavailable:'This tool is no longer available to request.',slot_is_self_provided:'You said you would bring your own for this slot. Untick that first.',slot_already_claimed:'This slot already has a request.'}[result.reason]||'That request could not be made.');persist();render();return;}
   state.loans.push(result.request);
   t.status='reserved';
