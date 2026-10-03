@@ -18,7 +18,25 @@
 └── package.json
 ```
 
-## 启动后端（端口 8000）
+## 一键启动（推荐，前后端一起）
+
+从全新 clone 到可演示只需一条命令（需要 Python 3.11+ 与 Node.js）：
+
+```bash
+./start.sh
+```
+
+脚本会自动：创建 `backend/.venv` 并安装依赖 → 首次运行时初始化演示数据库 → 生成**本次运行**的演示访问码（也可用 `DEMO_ACCESS_CODE=<团队码> ./start.sh` 指定）→ 同时拉起后端 :8000 与前端 :5173 → 打开浏览器并打印访问码。`Ctrl+C` 会一并停止前后端。
+
+```bash
+./start.sh --reset    # 重建演示数据库后启动
+./start.sh --help     # 选项说明
+BACKEND_PORT=8100 FRONTEND_PORT=5200 ./start.sh   # 换端口
+```
+
+Windows 用户请在 WSL / Git-Bash 中运行本脚本，或按下文分别手动启动。
+
+## 启动后端（端口 8000，手动方式）
 
 ```bash
 cd backend
