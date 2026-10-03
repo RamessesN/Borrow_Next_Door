@@ -108,8 +108,28 @@ test('matchTools prefers the same postcode over nearby, and hides unrelated post
     'a wider radius is opt-in only');
 });
 
-test('matchTools adds an approximate straight-line distance only when coordinates exist', () => {
-  const task = makeTask({ latitude: 55.9445, longitude: -3.1883 });
+test('nearbyPostcodes accepts an outcode as well as a full postcode', () => {
+  const task = makeTask();
+  const inDistrict = tool('eh7', 'cara', 'picker', 'available', { postcode: 'EH7 4AB' });
+  const nextDistrict = tool('eh9', 'cara', 'picker', 'available', { postcode: 'EH9 1AA' });
+  const far = tool('far', 'cara', 'picker', 'available', { postcode: 'AB1 2CD' });
+
+  // Member C holds outcodes from Postcodes.io /outcodes/{outcode}/nearest.
+  const found = D.matchTools('picker', ctx(task, [nextDistrict, inDistrict, far], [], { nearbyPostcodes: ['EH7'] }));
+  assert.deepEqual(found.map(f => f.toolId), ['eh7'], 'an outcode covers every postcode inside it');
+  assert.equal(found[0].scope, 'nearby');
+
+  // A full postcode still works, and an outcode must not leak into other districts.
+  assert.deepEqual(D.matchTools('picker', ctx(task, [inDistrict], [], { nearbyPostcodes: ['EH7 4AB'] })).map(f => f.toolId), ['eh7']);
+  assert.deepEqual(D.matchTools('picker', ctx(task, [nextDistrict], [], { nearbyPostcodes: ['EH7'] })), []);
+
+  assert.equal(D.outwardCode('eh89yl'), 'EH8');
+  assert.equal(D.outwardCode('EH7 4AB'), 'EH7');
+  assert.equal(D.outwardCode('EH7'), 'EH7');
+  assert.equal(D.outwardCode(''), '');
+});
+
+test('matchTools adds an approximate straight-line distance only when coordinates exist', () => {  const task = makeTask({ latitude: 55.9445, longitude: -3.1883 });
   const withCoords = tool('near', 'bob', 'picker', 'available', { latitude: 55.9545, longitude: -3.1883 });
   const without = tool('flat', 'cara', 'picker', 'available');
   const found = D.matchTools('picker', ctx(task, [without, withCoords], []));
@@ -412,4 +432,40 @@ test('haversineKm returns a plausible straight-line distance', () => {
   const d = D.haversineKm(55.9445, -3.1883, 51.5074, -0.1278); // Edinburgh -> London
   assert.ok(d > 520 && d < 545, 'expected ~534 km, got ' + d);
   assert.equal(D.haversineKm(55.9445, -3.1883, 55.9445, -3.1883), 0);
+});
+
+test('a finished request does not lock its slot forever', () => {
+  const tools = [tool('p1', 'bob', 'picker'), tool('p2', 'cara', 'picker')];
+  const task = makeTask();
+  const slot = task.requirements.find(r => r.category === 'picker');
+  const loans = [];
+  const context = () => ({ tools, loans });
+
+  // pending -> the slot is claimed
+  const first = D.createLoanRequest(tools[0], task, slot, 'alice', () => 'L1', context());
+  assert.equal(first.ok, true);
+  loans.push(first.request);
+  assert.equal(D.slotIsClaimed(task, slot, context()), true);
+  assert.equal(D.createLoanRequest(tools[1], task, slot, 'alice', () => 'L2', context()).reason, 'slot_already_claimed');
+
+  // handed over -> still claimed
+  loans[0].status = 'on_loan';
+  assert.equal(D.slotIsClaimed(task, slot, context()), true);
+
+  // returned -> the tool is back on the shelf, so the slot must reopen
+  loans[0].status = 'returned';
+  loans[0].returned_at = '2026-10-03T12:00:00Z';
+  assert.equal(D.slotIsClaimed(task, slot, context()), false, 'a returned loan is history, not a claim');
+  const again = D.createLoanRequest(tools[1], task, slot, 'alice', () => 'L2', context());
+  assert.equal(again.ok, true, 'the same slot can be borrowed again, which the impact panel counts');
+
+  // rejected / cancelled -> also reopen
+  loans[1] = again.request;
+  loans[1].status = 'rejected';
+  assert.equal(D.slotIsClaimed(task, slot, context()), false);
+  loans[1].status = 'cancelled';
+  assert.equal(D.slotIsClaimed(task, slot, context()), false);
+
+  // without loan data the guard stays conservative
+  assert.equal(D.slotIsClaimed(task, slot, {}), true, 'no data -> trust the stored pointer');
 });

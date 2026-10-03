@@ -163,3 +163,65 @@ test('a legacy browser demo store is migrated instead of crashing', () => {
   assert.equal(saved.tasks[0].self, undefined, 'the migration is written back, so it only happens once');
   assert.equal(saved.tasks[0].requirements.length, 2);
 });
+
+test('coordinates turn into an approximate straight-line distance in the checklist', () => {
+  const app = createApp();
+  const { run, click } = app;
+  run("location.hash='#task';render()");
+  click({ dataset: { template: 'cleanup' } });
+
+  // Nothing is invented when nobody has coordinates.
+  run("state.tools.find(t=>t.category==='gloves').owner_id='bob'");
+  run('render()');
+  assert.doesNotMatch(app.html(), /km away/);
+
+  // Member C's data: the task's green space and the neighbour's community point.
+  run("state.tasks[0].latitude=55.9445;state.tasks[0].longitude=-3.1883");
+  run("state.tools.find(t=>t.category==='gloves').latitude=55.9545;state.tools.find(t=>t.category==='gloves').longitude=-3.1883");
+  run('render()');
+  const note = app.html().match(/about [\d.]+ km away[^<]*/)[0];
+  assert.equal(note, 'about 1.1 km away, straight line', 'labelled as a straight line, never as a route or a walk');
+
+  // A neighbour in a different postcode is not "nearby" unless C says so.
+  run("state.tools.find(t=>t.category==='gloves').postcode='AB1 2CD';render()");
+  assert.doesNotMatch(app.html(), /km away/);
+  assert.match(app.html(), /Still looking for a neighbour/);
+});
+
+test('the same tool can be borrowed again after it comes back', () => {
+  const app = createApp();
+  const { run, click, submit } = app;
+
+  // A complete round trip first.
+  run("location.hash='#task';render()");
+  click({ dataset: { template: 'cleanup' } });
+  run("user='bob'");
+  submit('#publish-form', { name: 'My long-handled litter picker', category: 'picker', description: 'In the shed.' });
+  run("user='alice';render()");
+
+  const slot = run("state.tasks[0].requirements.find(r=>r.category==='picker').id");
+  const toolId = run("state.tools.find(t=>t.category==='picker').id");
+  click({ dataset: { borrow: toolId, req: slot } });
+  run("user='bob'");
+  click({ dataset: { transition: 'accepted', id: run('state.loans[0].id') } });
+  click({ dataset: { transition: 'on_loan', id: run('state.loans[0].id') } });
+  click({ dataset: { transition: 'returned', id: run('state.loans[0].id') } });
+  assert.equal(run("state.tools.find(t=>t.category==='picker').status"), 'available');
+
+  // The slot still points at the finished request. Asking for it again must work.
+  run("user='alice';location.hash='#task';render()");
+  assert.match(app.html(), /Available to request from Bob/);
+  click({ dataset: { borrow: toolId, req: slot } });
+
+  assert.equal(run('state.loans.length'), 2, 'a returned loan does not block the same slot forever');
+  assert.equal(run('state.loans[1].status'), 'pending');
+  assert.equal(run("state.tasks[0].requirements.find(r=>r.category==='picker').loan_request_id"), run('state.loans[1].id'));
+  assert.equal(run("state.tools.find(t=>t.category==='picker').status"), 'reserved');
+  assert.match(app.html(), /Awaiting Bob to respond/);
+
+  // And the borrower can still back out of the second request.
+  click({ dataset: { transition: 'cancelled', id: run('state.loans[1].id') } });
+  assert.equal(run('state.loans[1].status'), 'cancelled');
+  assert.equal(run("state.tools.find(t=>t.category==='picker').status"), 'available');
+  assert.equal(run("JSON.parse(JSON.stringify(state.tasks[0].impact))").bags_collected, null);
+});
