@@ -2,16 +2,15 @@
 # Borrow Next Door — one-command demo launcher
 #
 # Starts the backend (FastAPI :8000) and the frontend (:5173) together,
-# prepares everything from a fresh clone, prints the demo access code and
-# opens the app in your browser. Ctrl+C stops both.
+# prepares everything from a fresh clone and opens the app in your browser.
+# Ctrl+C stops both. No access code is required to sign in.
 #
 #   ./start.sh            # normal start (creates venv/DB on first run)
 #   ./start.sh --reset    # also rebuild the demo database
 #   ./start.sh --help
 #
 # Windows: run inside WSL/Git-Bash, or start the two processes manually
-# (see README.md). The access code is generated at runtime and never
-# written into the repository.
+# (see README.md).
 
 set -euo pipefail
 
@@ -27,7 +26,7 @@ for arg in "$@"; do
   case "$arg" in
     --reset) RESET_DB=1 ;;
     -h|--help)
-      sed -n '2,15p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+      sed -n '2,14p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     *) echo "Unknown option: $arg (try --help)" >&2; exit 2 ;;
@@ -65,17 +64,10 @@ if port_busy "$FRONTEND_PORT"; then
   die "Port $FRONTEND_PORT is already in use — stop the other frontend (or set FRONTEND_PORT=...)."
 fi
 
-# ---------- demo access code (runtime config, never stored in git) ----------
-if [[ -z "${DEMO_ACCESS_CODE:-}" ]]; then
-  DEMO_ACCESS_CODE="$("$PY" -c 'import secrets; print(secrets.token_urlsafe(18))')"
-  GENERATED_CODE=1
-else
-  GENERATED_CODE=0
-fi
-if [[ "${#DEMO_ACCESS_CODE}" -lt 16 ]]; then
-  die "DEMO_ACCESS_CODE must be at least 16 characters (got ${#DEMO_ACCESS_CODE})."
-fi
-export DEMO_ACCESS_CODE
+# ---------- runtime config ----------
+# No access code: demo sign-in only needs a user alias (alice/bob/carol).
+# A stale DEMO_ACCESS_CODE in the environment is ignored by the backend.
+unset DEMO_ACCESS_CODE
 export APP_MODE="${APP_MODE:-demo}"
 export DATABASE_PATH="${DATABASE_PATH:-./var/borrow-next-door.sqlite3}"
 
@@ -152,14 +144,7 @@ say "   Frontend  $URL"
 say "   Backend   http://127.0.0.1:$BACKEND_PORT  (API docs: /docs)"
 say "   API base  http://127.0.0.1:$BACKEND_PORT/api/v1"
 echo
-if [[ "$GENERATED_CODE" == "1" ]]; then
-  printf '   \033[1;36mDemo access code:\033[0m %s\n' "$DEMO_ACCESS_CODE"
-  say "   (generated for this run — set DEMO_ACCESS_CODE to use your own)"
-else
-  say "   Demo access code: using your DEMO_ACCESS_CODE from the environment"
-fi
-echo
-say "   Demo accounts: alice / bob / carol  (pick one when signing in)"
+say "   Sign in with a demo account: alice / bob / carol  (no access code)"
 say "   Two-window demo: open $URL in a normal and a"
 say "   private window, sign in as Alice and Bob — data is shared live."
 say "   Reset data:      ./start.sh --reset"

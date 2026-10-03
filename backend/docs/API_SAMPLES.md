@@ -41,13 +41,14 @@ BOB_TOKEN=<bob 登录返回的 access_token>
 
 ### 1. 登录（demo 会话）
 
+只需要 `user_alias`，**不需要访问码**（演示访问码已按用户决策移除，见
+DECISIONS.md「移除演示访问码」）。旧客户端仍可传 `access_code`：该字段为可选、
+直接被忽略（不会 422，也不参与任何校验）。
+
 ```bash
 curl -s -X POST "$BASE/api/v1/demo/sessions" \
   -H "Content-Type: application/json" \
-  -d '{
-    "user_alias": "alice",
-    "access_code": "<团队运行时配置的 DEMO_ACCESS_CODE>"
-  }'
+  -d '{ "user_alias": "alice" }'
 ```
 
 成功（201）：
@@ -69,7 +70,8 @@ curl -s -X POST "$BASE/api/v1/demo/sessions" \
 }
 ```
 
-关键错误（401 `UNAUTHENTICATED`，访问码错误或 alias 不存在；同 IP 每分钟 10 次失败后 429 `RATE_LIMITED`）：
+关键错误（401 `UNAUTHENTICATED`：alias 不存在或未激活；同一 IP 每分钟超过 60 次
+登录请求后 429 `RATE_LIMITED` 的宽松防刷限制）：
 
 ```json
 {

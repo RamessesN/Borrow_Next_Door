@@ -11,9 +11,10 @@ import os
 import uuid
 
 # Must be set before app.main is imported: the module builds an app instance
-# at import time and validates configuration (missing access code aborts).
-os.environ.setdefault("DEMO_ACCESS_CODE", "test-only-access-code-0001")
+# at import time and validates configuration. No access code is needed anymore
+# (removed by user decision), only APP_MODE.
 os.environ.setdefault("APP_MODE", "demo")
+os.environ.pop("DEMO_ACCESS_CODE", None)
 
 import pytest
 from fastapi.testclient import TestClient
@@ -23,7 +24,6 @@ from app.config import get_settings, reset_settings_cache
 from app.migrations import migrate
 from app.seed import seed
 
-TEST_ACCESS_CODE = "test-only-access-code-0001"
 ALIAS_LIST = ("alice", "bob", "carol")
 
 
@@ -35,9 +35,9 @@ def db_path(tmp_path) -> str:
 
 @pytest.fixture()
 def settings(db_path, monkeypatch):
-    """Test settings: temp DB file, known access code, demo mode."""
+    """Test settings: temp DB file, no access code, demo mode."""
     monkeypatch.setenv("DATABASE_PATH", db_path)
-    monkeypatch.setenv("DEMO_ACCESS_CODE", TEST_ACCESS_CODE)
+    monkeypatch.delenv("DEMO_ACCESS_CODE", raising=False)
     monkeypatch.setenv("APP_MODE", "demo")
     reset_settings_cache()
     reset_rate_limits()
@@ -63,11 +63,11 @@ def client(app):
         yield test_client
 
 
-def login(client: TestClient, alias: str, access_code: str = TEST_ACCESS_CODE) -> str:
-    """Perform a demo login and return the bearer token."""
+def login(client: TestClient, alias: str) -> str:
+    """Perform a demo login (alias only, no access code) and return the token."""
     resp = client.post(
         "/api/v1/demo/sessions",
-        json={"user_alias": alias, "access_code": access_code},
+        json={"user_alias": alias},
     )
     assert resp.status_code == 201, resp.text
     return resp.json()["data"]["access_token"]

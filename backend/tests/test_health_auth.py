@@ -1,4 +1,8 @@
-"""Contract tests for health checks and demo authentication (spec 8.2 / 4.1)."""
+"""Contract tests for health checks and demo authentication (spec 8.2 / 4.1).
+
+The demo access code was removed by explicit user decision (see
+docs/DECISIONS.md "移除演示访问码"): login only needs `user_alias`.
+"""
 
 from __future__ import annotations
 
@@ -6,7 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.config import SettingsError, get_settings, reset_settings_cache
-from tests.conftest import TEST_ACCESS_CODE, auth_headers, login
+from tests.conftest import auth_headers, login
 
 
 # --- Health -----------------------------------------------------------------
@@ -29,7 +33,7 @@ def test_health_ready_ok(client):
 
 def test_health_ready_503_without_migrations(tmp_path, monkeypatch):
     monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "fresh.sqlite3"))
-    monkeypatch.setenv("DEMO_ACCESS_CODE", TEST_ACCESS_CODE)
+    monkeypatch.delenv("DEMO_ACCESS_CODE", raising=False)
     reset_settings_cache()
     try:
         from app.main import create_app
@@ -53,7 +57,7 @@ def test_health_ready_503_without_migrations(tmp_path, monkeypatch):
 def test_demo_login_success(client):
     resp = client.post(
         "/api/v1/demo/sessions",
-        json={"user_alias": "alice", "access_code": TEST_ACCESS_CODE},
+        json={"user_alias": "alice"},
     )
     assert resp.status_code == 201, resp.text
     data = resp.json()["data"]
@@ -67,21 +71,28 @@ def test_demo_login_success(client):
     assert resp.json()["meta"]["request_id"]
 
 
-def test_demo_login_wrong_access_code(client):
+def test_demo_login_without_access_code_env(client, monkeypatch):
+    """Login works with no DEMO_ACCESS_CODE in the environment at all."""
+    monkeypatch.delenv("DEMO_ACCESS_CODE", raising=False)
+    resp = client.post("/api/v1/demo/sessions", json={"user_alias": "alice"})
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["data"]["access_token"]
+
+
+def test_demo_login_ignores_access_code(client):
+    """A leftover `access_code` key from an old client is accepted and ignored."""
     resp = client.post(
         "/api/v1/demo/sessions",
-        json={"user_alias": "alice", "access_code": "wrong-access-code-xxxx"},
+        json={"user_alias": "alice", "access_code": "stale-value-from-old-client"},
     )
-    assert resp.status_code == 401
-    err = resp.json()["error"]
-    assert err["code"] == "UNAUTHENTICATED"
-    assert "wrong-access-code" not in resp.text
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["data"]["user"]["alias"] == "alice"
 
 
 def test_demo_login_unknown_alias(client):
     resp = client.post(
         "/api/v1/demo/sessions",
-        json={"user_alias": "mallory", "access_code": TEST_ACCESS_CODE},
+        json={"user_alias": "mallory"},
     )
     assert resp.status_code == 401
     assert resp.json()["error"]["code"] == "UNAUTHENTICATED"
@@ -92,46 +103,59 @@ def test_demo_login_extra_field_rejected(client):
         "/api/v1/demo/sessions",
         json={
             "user_alias": "alice",
-            "access_code": TEST_ACCESS_CODE,
             "user_id": "u1111111-1111-4111-8111-111111111111",
         },
     )
     assert resp.status_code == 422
     err = resp.json()["error"]
     assert err["code"] == "VALIDATION_ERROR"
-    # field name is fine to echo, the secret value is not
-    assert TEST_ACCESS_CODE not in resp.text
+    assert "u1111111" not in err.get("message", "")
 
 
 # --- Configuration gate ------------------------------------------------------
 
 
-@pytest.mark.parametrize("bad_code", ["", "change-me", "placeholder", "short"])
-def test_startup_fails_without_valid_access_code(bad_code, monkeypatch):
-    monkeypatch.setenv("DEMO_ACCESS_CODE", bad_code)
+@pytest.mark.parametrize("env_value", [None, "", "change-me", "short"])
+def test_startup_needs_no_access_code(env_value, monkeypatch):
+    """Missing / empty / placeholder / short DEMO_ACCESS_CODE never blocks startup."""
+    if env_value is None:
+        monkeypatch.delenv("DEMO_ACCESS_CODE", raising=False)
+    else:
+        monkeypatch.setenv("DEMO_ACCESS_CODE", env_value)
+    monkeypatch.setenv("APP_MODE", "demo")
     reset_settings_cache()
-    with pytest.raises(SettingsError):
-        get_settings()
+    try:
+        settings = get_settings()
+        assert settings.app_mode == "demo"
+        assert settings.session_ttl_hours >= 1
+        assert not hasattr(settings, "demo_access_code")
+    finally:
+        reset_settings_cache()
 
 
-def test_create_app_fails_on_placeholder_code(monkeypatch):
-    monkeypatch.setenv("DEMO_ACCESS_CODE", "change-me")
+def test_create_app_starts_without_access_code(monkeypatch):
+    monkeypatch.delenv("DEMO_ACCESS_CODE", raising=False)
+    monkeypatch.setenv("APP_MODE", "demo")
     reset_settings_cache()
     try:
         from app.main import create_app
 
-        with pytest.raises(SystemExit):
-            create_app()
+        app = create_app()
+        assert app is not None
     finally:
         reset_settings_cache()
 
 
 def test_production_mode_refuses_to_start(monkeypatch):
+    """APP_MODE=production still refuses to start (real auth not implemented)."""
     monkeypatch.setenv("APP_MODE", "production")
-    monkeypatch.setenv("DEMO_ACCESS_CODE", TEST_ACCESS_CODE)
+    monkeypatch.delenv("DEMO_ACCESS_CODE", raising=False)
     reset_settings_cache()
-    with pytest.raises(SettingsError):
-        get_settings()
+    try:
+        with pytest.raises(SettingsError):
+            get_settings()
+    finally:
+        reset_settings_cache()
 
 
 # --- Session lifecycle --------------------------------------------------------
@@ -200,18 +224,18 @@ def test_me_success_payload(client, alice_token):
 # --- Rate limiting ------------------------------------------------------------
 
 
-def test_login_rate_limited_after_repeated_failures(client):
-    """10 failures/minute from one address -> 429 on the next attempt."""
-    for i in range(10):
+def test_login_rate_limited_after_soft_cap(client):
+    """Loose flood guard: 60 demo logins/minute per IP -> 429 on the next one."""
+    for i in range(60):
         resp = client.post(
             "/api/v1/demo/sessions",
-            json={"user_alias": "alice", "access_code": f"bad-code-attempt-{i:02d}!!"},
+            json={"user_alias": "alice"},
         )
-        assert resp.status_code == 401, f"attempt {i}: {resp.status_code}"
+        assert resp.status_code == 201, f"attempt {i}: {resp.status_code}"
 
     blocked = client.post(
         "/api/v1/demo/sessions",
-        json={"user_alias": "alice", "access_code": TEST_ACCESS_CODE},
+        json={"user_alias": "alice"},
     )
     assert blocked.status_code == 429
     assert blocked.json()["error"]["code"] == "RATE_LIMITED"

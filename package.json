@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "start": "node server.cjs",
-    "check": "node --check web/task-module.js && node --check web/app.js && node --check web/api.js && node --check web/integrations.js && node --check server.cjs",
+    "check": "node --check web/task-module.js && node --check web/map-module.js && node --check web/app.js && node --check web/api.js && node --check web/integrations.js && node --check server.cjs",
     "test": "node --test test/*.test.cjs && node smoke-test.cjs"
   }
 }

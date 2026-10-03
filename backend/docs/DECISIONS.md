@@ -25,16 +25,16 @@
 ## 2. APP_MODE=production 拒绝启动的原因
 
 规格 4.1：「未实现真实认证时，`APP_MODE=production` 应拒绝启动，不能偷偷沿用演示身份。」
-当前只有受访问码保护的演示会话（种子用户 alice/bob/carol），没有密码/注册/OAuth 等真实认证。若允许 production 模式启动，任何持访问码者即可冒充任意演示身份，等同于无认证。因此 `app/config.py` 在 `APP_MODE=production` 时抛 `SettingsError`，`app/main.py` 启动即失败并给出明确信息。接入真实认证后应移除此开关并补充相应测试。
+当前只有无门禁的演示会话（种子用户 alice/bob/carol），没有密码/注册/OAuth 等真实认证。若允许 production 模式启动，任何人即可冒充任意演示身份，等同于无认证。因此 `app/config.py` 在 `APP_MODE=production` 时抛 `SettingsError`，`app/main.py` 启动即失败并给出明确信息。接入真实认证后应移除此开关并补充相应测试。
 
-另外，无论模式如何，`DEMO_ACCESS_CODE` 缺失、占位值（change-me / placeholder 等）或短于 16 字符都直接启动失败，避免弱口令上线。
+> 变更（2026-10-03）：原「`DEMO_ACCESS_CODE` 缺失/占位/过短即启动失败」的校验已随访问码功能一并删除，见第 10 节。`APP_MODE=production` 拒绝启动这一条保留。
 
 ## 3. 演示身份不是真实注册
 
-- `POST /api/v1/demo/sessions` 只接受已存在于种子数据的 alias（alice / bob / carol），客户端不能传任意 `user_id` 创建身份。
+- `POST /api/v1/demo/sessions` 只接受已存在且激活的种子 alias（alice / bob / carol / dora / eve），客户端不能传任意 `user_id` 创建身份；前端登录选择器提供前三个账号。
 - `users` 表不存密码；会话表只存 token 的 SHA-256 摘要 + 创建/到期/注销时间。token 为 `secrets.token_urlsafe(32)`（≥32 随机字节）。
 - 演示账号仅用于比赛演示，任何界面/文档标注 "demo account"，不代表已验证居民身份。
-- 访问码由运行时环境变量注入（见 `.env.example`），不写入源码、不写入种子数据。
+- （已废止，见第 10 节）~~访问码由运行时环境变量注入（见 `.env.example`），不写入源码、不写入种子数据。~~ 演示访问码已于 2026-10-03 移除，登录不再需要任何访问码。
 
 ## 4. 共享契约摘要（所有并行任务必须遵守）
 
@@ -64,7 +64,7 @@ Pydantic 校验错误统一转成 422 `VALIDATION_ERROR`，details 只含字段�
 
 业务接口一律 `Authorization: Bearer <token>`；不接受 `X-User-Id`、JSON 内 owner_id/borrower_id 或昵称作为身份。
 `get_current_user` 同时校验摘要、未过期、未注销、用户 `is_active`，任一失败统一 401 `UNAUTHENTICATED`。
-登录失败：同 IP 每分钟 ≥10 次失败后 429 `RATE_LIMITED`（进程内计数）。
+当前登录限流：同 IP 每分钟最多 60 次登录请求，超过后 429 `RATE_LIMITED`（进程内计数）。原「10 次失败」规则已由第 10 节覆盖。
 
 ## 5. availability 是计算字段，不存在 tools.status 列（规格 5.3）
 
@@ -79,10 +79,10 @@ Pydantic 校验错误统一转成 422 `VALIDATION_ERROR`，details 只含字段�
 A 前端读 `availability`；Loan 仍读自己的 `status`。唯一并发保护来自部分唯一索引
 `uq_loans_one_active_tool` / `uq_loans_one_active_requirement`（规格 5.2，迁移中原样创建）。
 
-## 6. 本阶段范围
+## 6. 地基阶段范围（历史记录，当前整合范围见第 11 节）
 
-- 已实现：健康检查、demo 登录/注销、`/me`、数据库迁移、种子数据、错误/信封/幂等/geo/constants 共享模块、空壳路由（tools/loans/tasks/community 留给后续任务）。
-- 未实现（后续任务）：工具发布与列表、借还状态机、任务与需求状态、社区/环境数据、真实外部适配器（`app/adapters/base.py` 只定义协议与 envelope，未发任何外部 HTTP）。
+- 当时已实现：健康检查、demo 登录/注销、`/me`、数据库迁移、种子数据、错误/信封/幂等/geo/constants 共享模块、空壳路由（tools/loans/tasks/community 留给后续任务）。
+- 当时未实现（后续已整合，非当前限制）：工具发布与列表、借还状态机、任务与需求状态、社区/环境数据、真实外部适配器。
 
 ## 7. 文档交付（2026-10-03）
 
@@ -177,3 +177,88 @@ docs/TEST_REPORT.md 第 4 节）。
   Overpass 真实 payload 形状的解析、畸形 payload 与网络异常降级、AQI 分级
   边界、top-5 截断、haversine 参考值、postcode 200/404/500/异常路径。
 - 全量 `.venv/bin/pytest -q`：201 passed（基线 156，总数未减少）。
+
+## 10. 移除演示访问码（2026-10-03，用户决策，覆盖规格 4.1）
+
+**决策**：用户明确要求彻底移除 `DEMO_ACCESS_CODE` 功能——登录不再需要任何访问码。
+本条是对原规格 4.1 的明确覆盖，以用户说明为准。
+
+**原 4.1 的设计意图与现在的位置**：
+
+- 原设计意图是**防滥用 + 强制诚实的演示身份**——登录必须持有团队运行时空投的访问码，
+  避免陌生人随手冒充演示身份，也避免把演示环境当成公开注册服务。
+- 现在改为**本地演示无门禁**：项目在本机 `./start.sh` 下自用，访问码只增加摩擦
+  （要生成、传递、印在横幅上），没有对应的真实防护价值；`web/` 侧与文档也无需再同步这个秘密。
+- **演示身份仍然是 demo account，不是真实注册**：`users` 表不存密码、不能自助注册，
+  只有种子 alias（alice / bob / carol），界面与文档仍须标注 "demo account"，不代表已验证居民身份。
+  这一点与访问码是否存在无关，保持不变。
+- `APP_MODE=production` 仍拒绝启动（真实认证未实现），保留。
+
+**实现要点**：
+
+- `app/config.py`：删除 `_PLACEHOLDER_CODES`、`MIN_ACCESS_CODE_LENGTH`、`_read_access_code()`
+  与 `Settings.demo_access_code` 字段；缺失、空值、占位、过短都不再影响启动。
+  仍校验 `APP_MODE` ∈ {demo, production}、`DATABASE_PATH` 非空、`SESSION_TTL_HOURS >= 1`。
+- `app/routers/auth.py`：`DemoLoginRequest.access_code` 改为**可选字段并直接忽略**
+  （`str | None = None`），兼容旧客户端不报 422；`extra="forbid"` 保持，未知键仍 422。
+  成功仍 201 返回 `access_token / token_type / expires_at / user`。
+- `app/auth.py`：删除 `verify_access_code()` 与常数时间比较；`create_demo_session(alias, ip)`
+  只校验 alias 存在且激活。**限流改为对 demo 登录 POST 本身的宽松每 IP 限制：
+  60 次/分钟**——取「宽松限流」这一选项，理由：访问码失败计数已失去语义（不再有凭证失败），
+  而登录端点现在完全无门禁，保留一个远高于正常使用量的上限即可挡住廉价刷接口，
+  同时不会误伤本地演示（正常一次会话只登录 1–2 次）。token 生成/哈希/会话/注销/
+  `get_current_user` 逻辑不变。
+- `start.sh`：删除访问码的生成、长度校验与横幅打印；启动流程其余不变
+  （venv、依赖、数据库、双端、Ctrl+C），横幅只提示 alice / bob / carol。
+- 测试：`conftest.py` 删除 `TEST_ACCESS_CODE`，`login()` 只传 `user_alias`；
+  `tests/test_health_auth.py` 改写为「无 `DEMO_ACCESS_CODE` 也能启动与登录」
+  「带无关注键 `access_code` 也成功」「未知 alias 仍 401」「注销后 401」「无 token 401」
+  「`X-User-Id` 伪造无效」「60 次/分钟后 429」。
+- 文档：`README.md`、`.env.example` 删除该环境变量条目；`API_SAMPLES.md` 登录示例
+  只发 `user_alias` 并注明可选且被忽略；`TEST_REPORT.md` 追加本次实测记录。
+
+**脚本收尾（同日整合完成）**：
+`scripts/dev_server.sh`、`scripts/check_api.sh` 的访问码强制校验已删除；
+`check_api.sh` 登录只发送 `user_alias`。旧访问码变量残留也不影响运行。
+`backend/README.md` 与 `.env.example` 已移除过期的脚本 workaround 和该变量名。
+实测无变量、残留短值两种情况下接口冒烟均为 4 passed / 0 failed。
+
+## 11. 本轮前后端整合（2026-10-03）
+
+### 11.1 邮编浏览与登录身份分离
+
+首页输入邮编后通过 resolve 获取目标社区，环境卡与工具列表切换为该社区；
+`Back to my street` 清除 browse 上下文，回到登录者 home 社区。
+浏览不修改 `/me`、owner / borrower 身份、任务归属或发布工具的 home 社区。
+跨街区可见不等于可借，后端保留距离与权限校验。
+
+### 11.2 两个有工具的演示街区
+
+- `EH8 9AB`：Alice / Bob / Carol，3 件工具（浇水壶、手铲、手套）。
+- `EH14 4AS`：Dora / Eve，4 件工具（垃圾夹、手套、浇水壶、手铲）。
+- `EH16 5AA` 无工具 fixture 继续用于距离边界测试，因此数据库是 3 个社区、5 个用户、7 件工具，不应把「两个演示街区」写成「只有两个社区行」。
+- 根目录 `./start.sh --reset` 重建以上种子；会删除已有业务数据。
+
+### 11.3 地图模块与接线边界
+
+`web/map-module.js` 使用合成网格、Haversine 边权与 A* 规划每件候选工具的路径，
+按路径成本选最近工具；同时提供 Dijkstra 用于参考与单测核对。
+并行前端整合将可借、非本人、当前筛选可见的工具接入地图卡片，并从 home 中心点规划。
+地图显示最近工具高亮、路线和估算距离，无工具/无坐标时降级。
+这不是实际道路导航；同邮编工具使用中心点，无法代表真实门牌或步行路径。
+
+### 11.4 队友交付并入
+
+- 绿地列表使用 C 的数据，按直线距离排序、标注来源；保留 integrations iframe override。
+- `Postcode green context score` 是区域公开数据上下文，不是社区行动影响；
+  缺 provider 时不显示总分，fixture 明示 demo snapshot，绿地来源最多 5 个。
+- `EH8 9AB` 离线环境 fixture 回落，与 `EH14 4AS` 的快照都明确 `source_kind=fixture`。
+- 模板切换复用已有开放任务，保留需求进度，避免同模板重复创建任务。
+
+### 11.5 当前验收与未完成范围
+
+本轮最终实测：pytest 203 passed（1 个 Starlette TestClient 弃用 warning）；
+Node 69 passed（地图 UI 接线新增 3 例，早先为 66）；临时真实后端 smoke 通过，
+首页邮编切换/返回另以 mock DOM 实测。命令与原始输出见 `TEST_REPORT.md` 第 7 节。
+没有宣称真实浏览器双窗口操作或真实道路导航已经验收。
+照片上传、多槽位/多数量需求、`would_have_bought_new` 问卷暂缓；真实注册与 production 认证未实现。

@@ -27,7 +27,7 @@ backend/
 ├── app/
 │   ├── main.py              # FastAPI 应用工厂 + uvicorn 入口
 │   ├── config.py            # 环境变量设置（启动即校验，失败拒绝启动）
-│   ├── auth.py              # demo 会话、Bearer 校验、登录失败频率限制
+│   ├── auth.py              # demo 会话、Bearer 校验、每 IP 登录请求限流
 │   ├── db.py                # sqlite 连接、显式事务、时间工具
 │   ├── errors.py            # 规格 8.5 错误码表 + 全局错误处理
 │   ├── idempotency.py       # Idempotency-Key 原语
@@ -37,14 +37,14 @@ backend/
 │   ├── seed.py              # 幂等种子数据
 │   ├── schemas_common.py    # 信封与共享响应模型
 │   ├── adapters/
-│   │   └── base.py          # C 的外部数据适配器协议（待 C 实现）
+│   │   └── base.py          # 外部数据适配器协议；同目录含 postcode/carbon/air/greenspace 实现
 │   └── routers/
 │       ├── health.py        # /health/live、/health/ready
 │       ├── auth.py          # demo 登录/注销、/me
-│       ├── tools.py         # 工具端点（实现中）
-│       ├── loans.py         # 借还端点（实现中）
-│       ├── tasks.py         # 任务端点（实现中）
-│       └── community.py     # 社区/环境端点（实现中）
+│       ├── tools.py         # 工具端点（已实现）
+│       ├── loans.py         # 借还端点（已实现）
+│       ├── tasks.py         # 任务端点（已实现）
+│       └── community.py     # 社区/环境端点（已实现）
 ├── scripts/
 │   ├── dev_server.sh        # 一键启动开发服务器（端口 8000，单 worker）
 │   ├── reset_db.py          # 删除并重建演示数据库（迁移 + 种子）
@@ -71,20 +71,24 @@ python3.13 -m venv .venv
 
 ### 2. 配置环境变量
 
-复制 `.env.example` 到你的 shell / 进程管理器并填入真实值。`DEMO_ACCESS_CODE` 必填：至少 16 字符，空值、占位值（change-me / placeholder 等）或短于 16 字符都会导致启动失败。该访问码由团队运行时配置，不写入源码、种子数据或本文档。
+参照 `.env.example` 在 shell / 进程管理器中按需设置环境变量（脚本不会自动读取 `.env`）。**不需要任何访问码**，登录只传 `user_alias`；旧访问码环境变量即使残留也会被忽略，见 `docs/DECISIONS.md` 第 10 节。
 
 ### 3. 启动服务器
 
 ```bash
-DEMO_ACCESS_CODE=<团队访问码> ./scripts/dev_server.sh
+./scripts/dev_server.sh
 ```
 
-`scripts/dev_server.sh` 实际执行：切换到 `backend/` → 校验 `DEMO_ACCESS_CODE` 非空 → 默认 `APP_MODE=demo`、`DATABASE_PATH=./var/borrow-next-door.sqlite3` → 运行 `scripts/reset_db.py`（幂等：迁移 + 种子）→ `exec .venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 1`。
+最省事的完整启动方式是仓库根目录的 `./start.sh`，前后端一起启动，无需访问码。
+
+`scripts/dev_server.sh` 实际执行：切换到 `backend/` → 默认 `APP_MODE=demo`、`DATABASE_PATH=./var/borrow-next-door.sqlite3` → 运行 `scripts/reset_db.py`（删除并重建演示数据库）→ `exec .venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 1`。开发脚本每次启动都会清空该库；保留数据时请直接调用下方 uvicorn 命令。
+
+服务启动后可用 `./scripts/check_api.sh` 检查健康、无访问码登录与 `/me`；可选 `BASE_URL` / `USER_ALIAS` 控制目标服务与演示账号。
 
 也可以直接调用 uvicorn（数据库已存在时）：
 
 ```bash
-DEMO_ACCESS_CODE=<团队访问码> .venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 1
+.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 1
 ```
 
 启动后：
@@ -97,7 +101,6 @@ DEMO_ACCESS_CODE=<团队访问码> .venv/bin/uvicorn app.main:app --host 127.0.0
 | 变量 | 必填 | 默认值 | 说明 |
 |---|---|---|---|
 | `APP_MODE` | 否 | `demo` | 仅接受 `demo` / `production`。`production` 当前拒绝启动（真实认证未实现，规格 4.1）。 |
-| `DEMO_ACCESS_CODE` | 是 | 无 | 团队共享演示访问码，≥16 字符；占位值拒绝启动。由团队运行时配置，不写入源码。 |
 | `DATABASE_PATH` | 否 | `./var/borrow-next-door.sqlite3` | sqlite 文件路径，相对 `backend/` 或绝对路径。 |
 | `SESSION_TTL_HOURS` | 否 | `12` | 演示会话有效期（小时），≥1。 |
 
@@ -113,9 +116,9 @@ DEMO_ACCESS_CODE=<团队访问码> .venv/bin/uvicorn app.main:app --host 127.0.0
 
 ## 演示账号
 
-种子数据包含三个演示身份（均属于社区 `EH8 9AB`）：`alice`、`bob`、`carol`。
+种子数据包含两个有工具的演示街区：`EH8 9AB` 的 `alice`、`bob`、`carol`（3 件工具），以及 `EH14 4AS` 的 `dora`、`eve`（4 件工具）。另保留 `EH16 5AA` 无工具 fixture 用于距离边界测试。前端登录面板提供 Alice / Bob / Carol；Dora / Eve 的工具可通过首页邮编切换浏览。
 
-这些是**演示账号，不是真实注册**：不存密码，不代表已验证居民身份。登录方式是 `POST /api/v1/demo/sessions`，传 `user_alias` + 团队 `DEMO_ACCESS_CODE`，成功返回 Bearer token（服务端只存 SHA-256 摘要）。任何界面与文档都应标注 "demo account"。
+这些是**演示账号，不是真实注册**：不存密码，不代表已验证居民身份。登录方式是 `POST /api/v1/demo/sessions`，**只传 `user_alias`**，成功返回 Bearer token（服务端只存 SHA-256 摘要）。不需要访问码（已按用户决策移除）；旧客户端多传的 `access_code` 字段会被直接忽略。任何界面与文档都应标注 "demo account"。
 
 ## 健康检查与接口文档
 
@@ -140,7 +143,7 @@ DEMO_ACCESS_CODE=<团队访问码> .venv/bin/uvicorn app.main:app --host 127.0.0
 
 ## 安全提示
 
-- `DEMO_ACCESS_CODE` 由团队运行时配置（环境变量 / 进程管理器），不写入源码、种子、日志或文档。
-- 登录失败统一返回 401；同一 IP 每分钟 10 次失败后返回 429 `RATE_LIMITED`（进程内计数）。
+- 演示登录**无访问码门禁**；本地演示按「无门禁」设计运行，接入真实认证前 `APP_MODE=production` 仍拒绝启动。
+- 未知 / 未激活 alias 登录统一返回 401；同一 IP 每分钟超过 60 次登录请求返回 429 `RATE_LIMITED`（进程内计数的宽松防刷上限，替代原「10 次失败」限制）。
 - Bearer token 为 ≥32 随机字节的 opaque 字符串，服务端只保存 SHA-256 摘要与到期/注销时间。
-- 错误响应不回显 `access_code`、`Authorization` 或原始敏感输入，不含堆栈、SQL 或磁盘路径。
+- 错误响应不回显 `Authorization` 或原始敏感输入，不含堆栈、SQL 或磁盘路径。

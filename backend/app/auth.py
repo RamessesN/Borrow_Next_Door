@@ -1,21 +1,22 @@
-"""Demo-session authentication (spec 4.1).
+"""Demo-session authentication (spec 4.1, access code removed by user decision).
 
 Tokens are opaque secrets (>=32 random bytes); the server stores only the
 SHA-256 hex digest plus expiry/revocation timestamps. Real authentication is
 not implemented, so APP_MODE=production refuses to start (enforced in
 app.config) and the demo routes are only registered in demo mode.
+
+Login no longer takes an access code: only `user_alias` is needed. A loose
+per-IP cap on the login endpoint itself remains as a flood guard.
 """
 
 from __future__ import annotations
 
 import hashlib
-import hmac
 import secrets
 import threading
 import time
 from collections import defaultdict, deque
 from dataclasses import dataclass
-from datetime import timedelta
 from typing import Deque
 
 from fastapi import Request
@@ -39,37 +40,35 @@ def hash_token(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
-def verify_access_code(attempted: str) -> bool:
-    """Constant-time comparison against the configured demo access code."""
-    expected = get_settings().demo_access_code
-    return hmac.compare_digest(
-        attempted.encode("utf-8"), expected.encode("utf-8")
-    )
-
-
-# --- Login failure rate limiting (in-process, per IP) ---------------------
+# --- Login endpoint rate limiting (in-process, per IP) ---------------------
+#
+# The access code (and its failure-based throttling) was removed by user
+# decision: demo login only needs a user_alias. What remains is a deliberately
+# loose cap on the endpoint itself -- 60 demo logins per minute per IP -- so
+# the now-unauthenticated POST cannot be flooded cheaply, without bringing back
+# credential-failure bookkeeping that no longer applies.
 
 _LOCK = threading.Lock()
-_FAILURE_WINDOW_SECONDS = 60
-_FAILURE_THRESHOLD = 10
-_failures: dict[str, Deque[float]] = defaultdict(deque)
+_RATE_WINDOW_SECONDS = 60
+_RATE_THRESHOLD = 60
+_attempts: dict[str, Deque[float]] = defaultdict(deque)
 
 
-def _register_failure(ip: str) -> int:
+def _register_attempt(ip: str) -> int:
     now = time.monotonic()
     with _LOCK:
-        q = _failures[ip]
-        while q and now - q[0] > _FAILURE_WINDOW_SECONDS:
+        q = _attempts[ip]
+        while q and now - q[0] > _RATE_WINDOW_SECONDS:
             q.popleft()
         q.append(now)
         return len(q)
 
 
-def _failures_in_window(ip: str) -> int:
+def _attempts_in_window(ip: str) -> int:
     now = time.monotonic()
     with _LOCK:
-        q = _failures[ip]
-        while q and now - q[0] > _FAILURE_WINDOW_SECONDS:
+        q = _attempts[ip]
+        while q and now - q[0] > _RATE_WINDOW_SECONDS:
             q.popleft()
         return len(q)
 
@@ -77,7 +76,7 @@ def _failures_in_window(ip: str) -> int:
 def reset_rate_limits() -> None:
     """Clear counters (tests only)."""
     with _LOCK:
-        _failures.clear()
+        _attempts.clear()
 
 
 def _client_ip(request: Request) -> str:
@@ -90,19 +89,16 @@ def _client_ip(request: Request) -> str:
 # --- Session lifecycle -----------------------------------------------------
 
 
-def create_demo_session(alias: str, access_code: str, ip: str) -> dict:
-    """Validate credentials and create a session row.
+def create_demo_session(alias: str, ip: str) -> dict:
+    """Create a session row for an existing demo alias.
 
     Returns a dict with access_token, token_type, expires_at, and user info.
-    Raises AppError(UNAUTHENTICATED) on bad credentials, AppError(RATE_LIMITED)
-    after repeated failures from one IP.
+    Raises AppError(UNAUTHENTICATED) for an unknown/inactive alias and
+    AppError(RATE_LIMITED) when one IP exceeds the loose login cap.
     """
-    if _failures_in_window(ip) >= _FAILURE_THRESHOLD:
+    if _attempts_in_window(ip) >= _RATE_THRESHOLD:
         raise AppError("RATE_LIMITED", http_status=429)
-
-    if not verify_access_code(access_code):
-        _register_failure(ip)
-        raise AppError("UNAUTHENTICATED")
+    _register_attempt(ip)
 
     with connection() as conn:
         row = conn.execute(
@@ -111,7 +107,6 @@ def create_demo_session(alias: str, access_code: str, ip: str) -> dict:
             (alias.strip(),),
         ).fetchone()
         if row is None or not row["is_active"]:
-            _register_failure(ip)
             raise AppError("UNAUTHENTICATED")
 
         token = secrets.token_urlsafe(32)

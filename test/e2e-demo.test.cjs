@@ -11,12 +11,13 @@
  */
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { createApp, ACCESS_CODE } = require('./harness.cjs');
+const { createApp } = require('./harness.cjs');
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-async function signIn(app, alias, code) {
-  app.submit('#login-form', { user_alias: alias, access_code: code === undefined ? ACCESS_CODE : code });
+/* Demo sign-in is alias-only: no access code is asked for or sent. */
+async function signIn(app, alias) {
+  app.submit('#login-form', { user_alias: alias });
   await app.flush();
 }
 async function signOut(app) {
@@ -31,12 +32,13 @@ test('bob lends, alice borrows: the full story through the real API client', asy
   /* ---- 0. signed out: the login panel is the whole app ---- */
   assert.match(app.html(), /DEMO ACCOUNTS/, 'no token means no data, only a sign-in form');
   assert.match(app.html(), /demo account/, 'the demo accounts are named');
+  assert.ok(!app.html().includes('access_code'), 'no access-code field: the demo sign-in is alias-only');
   assert.equal(app.run('state.me'), null, 'viewing the page must not invent a session');
 
-  /* ---- 1. wrong access code -> the server message, form untouched ---- */
-  await signIn(app, 'bob', 'definitely-not-the-code');
+  /* ---- 1. an unknown alias -> the server message, form untouched ---- */
+  await signIn(app, 'mallory');
   assert.match(app.html(), /DEMO ACCOUNTS/, 'a failed sign-in stays on the form');
-  assert.equal(app.element('#login-message').textContent, 'Authentication required.');
+  assert.equal(app.element('#login-message').textContent, 'Unknown demo account. Pick Alice, Bob or Carol.');
   assert.equal(app.stored.has('bnd.token'), false, 'nothing is stored for a failed sign-in');
 
   /* ---- 2. bob signs in ---- */
@@ -61,6 +63,7 @@ test('bob lends, alice borrows: the full story through the real API client', asy
   assert.equal(app.run("state.tools[0].category"), 'litter_picker', 'the frozen B slug round-trips');
   assert.equal(app.run("state.tools[0].availability"), 'available');
   assert.match(app.html(), /Ready to share/);
+  assert.match(app.html(), /No borrowable tools nearby yet/, 'Bob’s own tool is not a route candidate');
 
   /* ---- 4. sign out, alice signs in ---- */
   await signOut(app);
@@ -69,6 +72,9 @@ test('bob lends, alice borrows: the full story through the real API client', asy
   await signIn(app, 'alice');
   assert.equal(app.run('state.me.display_name'), 'Alice');
   assert.equal(app.run('state.tools.length'), 1, 'Alice sees Bob\'s tool');
+  assert.match(app.html(), /class="tool-pin nearest"/, 'API ToolResponse community coordinates become a map pin');
+  assert.match(app.html(), /Closest: My long-handled litter picker — about \d+ m \(estimated route\)/);
+  assert.match(app.html(), /<polyline class="route"/, 'the route is rendered even when postcode centres coincide');
 
   /* ---- 5. alice creates the action ---- */
   app.run("location.hash='#task';render()");
@@ -179,6 +185,40 @@ test('bob lends, alice borrows: the full story through the real API client', asy
   assert.equal(new Set(keys).size, keys.length, 'one user intent = one key; no key is reused across intents');
   app.server.writes.filter(w => /demo\/sessions|sessions\/logout/.test(w.path))
     .forEach(w => assert.equal(w.key, null, 'auth routes must not send an Idempotency-Key'));
+});
+
+test('action templates switch both ways and preserve existing progress without duplicate tasks', async () => {
+  const app = createApp();
+  await app.flush();
+  await signIn(app, 'alice');
+  app.run("location.hash='#task';render()");
+  app.click({ dataset: { template: 'flowerbed_care' } });
+  await app.flush();
+  const flowerId = app.run('myOpenTask().id');
+  const requirementId = app.run('myOpenTask().requirements[0].id');
+  await app.run(`client.setSelfSupply('${flowerId}', '${requirementId}', true)`);
+  await app.run('refresh()');
+
+  app.click({ dataset: { template: 'park_cleanup' } });
+  await app.flush();
+  assert.equal(app.run('myOpenTask().template_id'), 'park_cleanup');
+  assert.equal(app.run('myOpenTask().requirements.map(r => r.category).join(",")'), 'litter_picker,reusable_gloves');
+  assert.match(app.html(), /template-option active" data-template="park_cleanup"/);
+
+  app.click({ dataset: { template: 'flowerbed_care' } });
+  await app.flush();
+  assert.equal(app.run('myOpenTask().id'), flowerId);
+  assert.equal(app.run('myOpenTask().requirements[0].self_supplied'), true);
+  assert.match(app.html(), /template-option active" data-template="flowerbed_care"/);
+  await app.run('refresh();');
+  assert.equal(app.run('myOpenTask().id'), flowerId, 'refresh preserves the selected activity');
+
+  app.click({ dataset: { template: 'park_cleanup' } });
+  await app.flush();
+  app.click({ dataset: { template: 'park_cleanup' } });
+  await app.flush();
+  assert.equal(app.run('myOpenTask().template_id'), 'park_cleanup');
+  assert.equal(app.server.db.tasks.length, 2, 'repeated switching reuses open tasks');
 });
 
 test('server errors keep the form open and show the backend message', async () => {

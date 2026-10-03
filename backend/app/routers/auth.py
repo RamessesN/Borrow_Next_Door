@@ -26,7 +26,10 @@ class DemoLoginRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     user_alias: str = Field(min_length=1, max_length=80)
-    access_code: str = Field(min_length=1, max_length=200)
+    # Kept only for backward compatibility with older clients: the demo access
+    # code was removed by user decision, so any value here is accepted and
+    # ignored. It never reaches create_demo_session.
+    access_code: str | None = Field(default=None, max_length=200)
 
 
 class DemoUser(BaseModel):
@@ -93,7 +96,7 @@ def demo_login(request: Request, body: DemoLoginRequest) -> dict:
     forwarded = request.headers.get("x-forwarded-for")
     if forwarded:
         ip = forwarded.split(",")[0].strip()
-    session = create_demo_session(body.user_alias, body.access_code, ip)
+    session = create_demo_session(body.user_alias, ip)
     return success(session, _rid(request))
 
 

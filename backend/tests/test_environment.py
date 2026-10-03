@@ -21,6 +21,10 @@ def _epoch(year: int, month: int, day: int, hour: int, minute: int = 0) -> int:
     return int(datetime(year, month, day, hour, minute, tzinfo=timezone.utc).timestamp())
 
 HOME_COMMUNITY_ID = "c1111111-1111-4111-8111-111111111111"
+# EH16 5AA is seeded, is NOT in DEMO_CACHE, and is the subject for the
+# degraded / no-fixture paths. EH8 9AB (the home community) now carries an
+# honest demo fixture, so it can no longer stand in for "no fixture".
+NO_FIXTURE_COMMUNITY_ID = "c2222222-2222-4222-8222-222222222222"
 UNKNOWN_COMMUNITY_ID = "00000000-0000-4000-8000-000000000000"
 
 ENV_SECTION_FIELDS = (
@@ -184,11 +188,11 @@ def _mock_upstream_down(monkeypatch) -> None:
 def test_environment_envelope_shape_when_upstream_down(client, alice_token, monkeypatch):
     """With every upstream unreachable the response is still well-formed.
 
-    The home community (EH8 9AB) is not a demo-cache postcode, so all three
-    providers degrade to unavailable sections with honest source metadata.
+    EH16 5AA is seeded but has no demo-cache fixture, so all three providers
+    degrade to unavailable sections with honest source metadata.
     """
     _mock_upstream_down(monkeypatch)
-    resp = _get_env(client, alice_token)
+    resp = _get_env(client, alice_token, NO_FIXTURE_COMMUNITY_ID)
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["meta"]["request_id"]
@@ -204,8 +208,8 @@ def test_environment_envelope_shape_when_upstream_down(client, alice_token, monk
     postcode_section = data["postcode"]
     assert postcode_section["status"] == "ok"
     assert postcode_section["source_kind"] == "fixture"
-    assert postcode_section["data"]["postcode"] == "EH8 9AB"
-    assert postcode_section["data"]["outcode"] == "EH8"
+    assert postcode_section["data"]["postcode"] == "EH16 5AA"
+    assert postcode_section["data"]["outcode"] == "EH16"
     assert "fixture" in postcode_section["attribution"].lower()
 
     # All three providers failed upstream: unavailable, but the envelope
@@ -321,7 +325,7 @@ def test_environment_partial_when_one_provider_ok(client, alice_token, monkeypat
     monkeypatch.setattr(
         "app.adapters.carbon.fetch", lambda **kwargs: _ok_carbon(42)
     )
-    resp = _get_env(client, alice_token)
+    resp = _get_env(client, alice_token, NO_FIXTURE_COMMUNITY_ID)
     assert resp.status_code == 200, resp.text
     data = resp.json()["data"]
 
@@ -342,7 +346,7 @@ def test_environment_partial_when_one_provider_ok(client, alice_token, monkeypat
         row = conn.execute(
             "SELECT payload_json, source_kind, fetched_at, fresh_until, stale_until "
             "FROM external_cache WHERE cache_key = ?",
-            (cache_key("carbon_intensity", "EH8"),),
+            (cache_key("carbon_intensity", "EH16"),),
         ).fetchone()
     assert row is not None
     assert json.loads(row[0])["intensity"] == 42
@@ -358,7 +362,7 @@ def test_environment_all_unavailable_is_unavailable(client, alice_token, monkeyp
     monkeypatch.setattr("app.adapters.air.fetch", fake("air_quality"))
     monkeypatch.setattr("app.adapters.greenspace.fetch", fake("greenspace"))
 
-    resp = _get_env(client, alice_token)
+    resp = _get_env(client, alice_token, NO_FIXTURE_COMMUNITY_ID)
     assert resp.status_code == 200, resp.text
     data = resp.json()["data"]
     for section_name in ("carbon_intensity", "air_quality", "greenspace"):
@@ -381,7 +385,7 @@ def test_environment_provider_failure_does_not_break_response(
     monkeypatch.setattr("app.adapters.air.fetch", boom)
     monkeypatch.setattr("app.adapters.carbon.fetch", lambda **kwargs: _ok_carbon())
 
-    resp = _get_env(client, alice_token)
+    resp = _get_env(client, alice_token, NO_FIXTURE_COMMUNITY_ID)
     assert resp.status_code == 200, resp.text
     data = resp.json()["data"]
     assert data["air_quality"]["status"] == "unavailable"
@@ -413,8 +417,8 @@ def test_environment_demo_fixture_fallback_when_upstream_down(
             "INSERT INTO communities (id, postcode, outcode, latitude, longitude, "
             "country, source, source_kind, fetched_at, created_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            ("c9999999-9999-4999-8999-999999999999", "EH14 4AS", "EH14",
-             55.9092, -3.3193, "Scotland", "fixture", "fixture", now, now),
+            ("c9999999-9999-4999-8999-999999999999", "EH8 9YL", "EH8",
+             55.9443, -3.1880, "Scotland", "fixture", "fixture", now, now),
         )
 
     _mock_upstream_down(monkeypatch)
@@ -428,21 +432,21 @@ def test_environment_demo_fixture_fallback_when_upstream_down(
     carbon = data["carbon_intensity"]
     assert carbon["status"] == "ok"
     assert carbon["source_kind"] == "fixture"
-    assert carbon["data"]["index"] == "very low"
-    assert carbon["data"]["forecast"] == 38
+    assert carbon["data"]["index"] == "low"
+    assert carbon["data"]["forecast"] == 40
     assert "fixture" in carbon["attribution"].lower()
     assert carbon["source_url"] == "https://carbon-intensity.github.io/api-definitions/"
 
     air = data["air_quality"]
     assert air["status"] == "ok"
     assert air["source_kind"] == "fixture"
-    assert air["data"]["aqi"] == 19
-    assert air["data"]["status"] == "Good"
+    assert air["data"]["aqi"] == 26
+    assert air["data"]["status"] == "Fair"
 
     green = data["greenspace"]
     assert green["status"] == "ok"
     assert green["source_kind"] == "fixture"
-    assert green["data"][0]["name"] == "Riccarton Estate & Campus Loch"
+    assert green["data"][0]["name"] == "George Square Gardens"
     assert "OpenStreetMap" in green["attribution"]
 
     # All three providers healthy on fixture data -> overall ok.
@@ -456,6 +460,30 @@ def test_environment_demo_fixture_fallback_when_upstream_down(
     assert rows == []
 
 
+def test_environment_home_community_has_offline_fixture_fallback(
+    client, alice_token, monkeypatch, db_path
+):
+    """The seeded home community (EH8 9AB) is offline-safe: with every
+    upstream unreachable it falls back to C's honest fixture snapshot, so the
+    demo never depends on live Overpass / Open-Meteo / NESO."""
+    _mock_upstream_down(monkeypatch)
+    resp = _get_env(client, alice_token)
+    assert resp.status_code == 200, resp.text
+    data = resp.json()["data"]
+
+    green = data["greenspace"]
+    assert green["status"] == "ok"
+    assert green["source_kind"] == "fixture"
+    names = [place["name"] for place in green["data"]]
+    assert "George Square Gardens" in names
+    assert "The Meadows" in names
+    assert green["data"][0]["distance_km"] <= 2
+
+    assert data["air_quality"]["source_kind"] == "fixture"
+    assert data["carbon_intensity"]["source_kind"] == "fixture"
+    assert data["status"] == "ok"
+
+
 # --- cache freshness / staleness ----------------------------------------------
 
 
@@ -466,7 +494,7 @@ def test_environment_fresh_cache_served_without_adapter_call(
     _insert_cache(
         db_path,
         "carbon_intensity",
-        "EH8",
+        "EH16",
         {"intensity": 77, "index": "moderate"},
         fetched_at=now - 600,
         fresh_until=now + 3600,
@@ -479,7 +507,7 @@ def test_environment_fresh_cache_served_without_adapter_call(
     _mock_upstream_down(monkeypatch)
     monkeypatch.setattr("app.adapters.carbon.fetch", no_call)
 
-    resp = _get_env(client, alice_token)
+    resp = _get_env(client, alice_token, NO_FIXTURE_COMMUNITY_ID)
     assert resp.status_code == 200, resp.text
     section = resp.json()["data"]["carbon_intensity"]
     assert section["status"] == "cached"
@@ -535,7 +563,7 @@ def test_environment_expired_cache_is_not_served(
     _insert_cache(
         db_path,
         "carbon_intensity",
-        "EH8",
+        "EH16",
         {"intensity": 1},
         fetched_at=now - 86400,
         fresh_until=now - 7200,
@@ -549,10 +577,10 @@ def test_environment_expired_cache_is_not_served(
         ),
     )
 
-    resp = _get_env(client, alice_token)
+    resp = _get_env(client, alice_token, NO_FIXTURE_COMMUNITY_ID)
     assert resp.status_code == 200, resp.text
     section = resp.json()["data"]["carbon_intensity"]
-    # EH8 9AB is not a demo postcode: no fixture fallback either.
+    # EH16 5AA is not a demo postcode: no fixture fallback either.
     assert section["status"] == "unavailable"
     assert section["data"] is None
     assert section["source_kind"] is None
