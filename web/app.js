@@ -293,13 +293,154 @@ function community() {
   const shown = currentCommunity();
   const shownOutcode = esc(shown ? shown.outcode : '');
   return `<section class="hero"><div class="hero-copy"><span class="location"><i></i> Small actions. Right on your doorstep.</span><h1>A little sharing.<br>A <em>greener</em><br>neighbourhood.</h1><p>The tools you need might be just next door.<br>Borrow, lend, and make your patch a little better.</p><form class="postcode-form" id="postcode-form"><span aria-hidden="true">⌖</span><input id="postcode" aria-label="Your UK postcode" value="${esc(postcode())}" maxlength="10" required><button type="submit">Check a postcode ↗</button></form><p class="field-message" id="postcode-message">${postcodeMessage()}</p></div><div class="hero-art">${gardenArt()}<span class="art-note">Good things grow together.</span><div class="art-label"><div class="mini-avatars"><span>A</span><span>B</span><span>♡</span></span><span>Less buying. More belonging.</span></div></div></section>
-<section><div class="section-heading"><div><h2>A small look at your local patch</h2><p>Environmental context for ${esc(postcode())} — reported per provider by the API.</p></div><span class="eyebrow">${state.browse ? `BROWSING ${esc(state.browse.outcode)}` : 'YOUR POSTCODE, TOGETHER'}</span></div><div class="environment">${envCard('≋','The air around you','air_quality','Open-Meteo')}${envCard('ϟ','Your regional electricity','carbon_intensity','NESO Carbon Intensity')}<div class="env-card"><span class="env-icon">♧</span><div><h3>Room to grow</h3><strong>${esc(greenspaceLabel())}</strong><p>Green spaces near ${shownOutcode}</p></div></div></div></section>
-<div class="workspace"><section><div class="section-heading"><div><h2>Good tools. Great neighbours.</h2><p>Something sitting in your shed could start something good.</p></div><button class="btn secondary" data-publish>＋ Lend a tool</button></div><div class="filterbar"><div class="filters">${[['all','All tools'],['garden','Gardening'],['cleanup','Clean-up'],['available','Available']].map(([v,l])=>`<button class="chip ${ui.filter===v?'active':''}" data-filter="${v}">${l}</button>`).join('')}</div><input class="search-input" id="tool-search" value="${esc(ui.search)}" placeholder="Search tools…" aria-label="Search tools"></div><div class="tool-grid" id="tool-grid">${toolCards()}</div></section><aside><div class="action-card"><span class="eyebrow">LET’S DO SOME GOOD</span><span class="flower">✳</span><h2>A greener street<br>starts with us.</h2><p>Pick a small action. Find the tools.<br>Make a difference, together.</p><a class="btn primary" href="#task">Start a community action <span>↗</span></a></div><div class="map-card"><h3>⌖ Your next little project</h3>${slot('map','<div class="map-placeholder"><span class="map-symbol">⌑</span><b>A space for your neighbourhood map</b><small>Green spaces module · ready to connect</small></div>')}<p>Real places appear when the location module is connected.</p></div></aside></div><div class="bottom-banner"><span>✳</span><div><strong>The more we share, the more we can do.</strong><p>${banner ? `${banner.active_tools_count} tools shared · ${banner.returned_loans_count} returned loans · ${banner.completed_tasks_count} completed actions in ${esc(me.community.outcode)}.` : 'A missing litter picker today. A whole community clean-up tomorrow.'}</p></div><button class="text-button" data-publish>Be someone’s helpful neighbour ↗</button></div>`;
+<section><div class="section-heading"><div><h2>A small look at your local patch</h2><p>Environmental context for ${esc(postcode())} — reported per provider by the API.</p></div><span class="eyebrow">${state.browse ? `BROWSING ${esc(state.browse.outcode)}` : 'YOUR POSTCODE, TOGETHER'}</span></div><div class="environment">${envCard('≋','The air around you','air_quality','Open-Meteo')}${envCard('ϟ','Your regional electricity','carbon_intensity','NESO Carbon Intensity')}<div class="env-card"><span class="env-icon">♧</span><div><h3>Room to grow</h3><strong>${esc(greenspaceLabel())}</strong><p>Green spaces near ${shownOutcode}</p></div></div></div>${contextScoreCard()}</section>
+<div class="workspace"><section><div class="section-heading"><div><h2>Good tools. Great neighbours.</h2><p>Something sitting in your shed could start something good.</p></div><button class="btn secondary" data-publish>＋ Lend a tool</button></div><div class="filterbar"><div class="filters">${[['all','All tools'],['garden','Gardening'],['cleanup','Clean-up'],['available','Available']].map(([v,l])=>`<button class="chip ${ui.filter===v?'active':''}" data-filter="${v}">${l}</button>`).join('')}</div><input class="search-input" id="tool-search" value="${esc(ui.search)}" placeholder="Search tools…" aria-label="Search tools"></div><div class="tool-grid" id="tool-grid">${toolCards()}</div></section><aside><div class="action-card"><span class="eyebrow">LET’S DO SOME GOOD</span><span class="flower">✳</span><h2>A greener street<br>starts with us.</h2><p>Pick a small action. Find the tools.<br>Make a difference, together.</p><a class="btn primary" href="#task">Start a community action <span>↗</span></a></div><div class="map-card"><h3>⌖ Green spaces nearby</h3>${slot('map', greenSpacePanel())}</div></aside></div><div class="bottom-banner"><span>✳</span><div><strong>The more we share, the more we can do.</strong><p>${banner ? `${banner.active_tools_count} tools shared · ${banner.returned_loans_count} returned loans · ${banner.completed_tasks_count} completed actions in ${esc(me.community.outcode)}.` : 'A missing litter picker today. A whole community clean-up tomorrow.'}</p></div><button class="text-button" data-publish>Be someone’s helpful neighbour ↗</button></div>`;
 }
 function greenspaceLabel() {
   const p = provider(visibleEnvironment(), 'greenspace');
   if (p && (p.status === 'ok' || p.status === 'cached')) return p.attribution || 'Connected';
   return 'Find a green space';
+}
+
+/* ------------------------------------------- C: green spaces & context score */
+/* Everything below reads only C's three environment providers (greenspace,
+   air_quality, carbon_intensity). The map card shows the real places C already
+   returns, and the context score is a labelled regional public-data estimate —
+   it never touches D's impact panel (state.impact / impactPanel). */
+function isFreshProvider(p) { return !!p && (p.status === 'ok' || p.status === 'cached'); }
+function finiteNumber(v) {
+  // A provider that answers with null/undefined/'' must not become 0 via
+  // Number() — that would score a missing value as the best possible.
+  if (v === null || v === undefined || v === '') return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+function captureLabel(iso) { return iso ? `${String(iso).slice(0, 16).replace('T', ' ')} UTC` : 'time not reported'; }
+
+/** Honest reason a provider contributes nothing: a provider that answered but
+ *  returned no value is not the same as one still being waited on. */
+function providerGap(p, source, emptyReason) {
+  return isFreshProvider(p) ? `${source} ${emptyReason}` : `still waiting on ${source}`;
+}
+
+/** The map card body when no embed URL is configured: C's real green spaces,
+ *  nearest first, with straight-line distance (C returns distance_km, not a
+ *  walking route) and an honest degraded state that tells an empty answer
+ *  apart from a source still pending. */
+function greenSpacePanel() {
+  const p = provider(state.environment, 'greenspace');
+  const places = isFreshProvider(p) && Array.isArray(p.data)
+    ? p.data.filter(pl => pl && typeof pl.name === 'string') : [];
+  if (!places.length) {
+    const source = (p && (p.source || p.attribution)) || 'OpenStreetMap Overpass API';
+    const detail = providerGap(p, source, 'answered with no named green spaces');
+    return `<div class="map-placeholder"><span class="map-symbol">⌑</span><b>Green spaces near ${esc(state.me.community.outcode)}</b><small>${esc(detail)}.</small></div>`;
+  }
+  const nearestFirst = places.slice().sort((a, b) => (finiteNumber(a.distance_km) ?? Infinity) - (finiteNumber(b.distance_km) ?? Infinity));
+  const rows = nearestFirst.map(pl => {
+    const km = finiteNumber(pl.distance_km);
+    const distance = km === null ? 'distance pending' : `${km.toFixed(2)} km`;
+    return `<li class="green-place"><span class="green-name">${esc(pl.name)}</span><span class="green-type">${esc(pl.type || 'Green space')}</span><span class="green-distance">${esc(distance)}</span></li>`;
+  }).join('');
+  const kind = p.source_kind === 'fixture' ? 'demo fixture' : (p.status === 'cached' || p.source_kind === 'cached' ? 'cached' : 'live');
+  const when = captureLabel(p.fetched_at);
+  // A fixture snapshot must never be mistaken for a live query result.
+  const badge = p.source_kind === 'fixture' ? `<p class="fixture-badge">Demo fixture snapshot — sample data, not a live query. Captured ${esc(when)}.</p>` : '';
+  return `${badge}<ul class="green-list">${rows}</ul><p class="green-source">${esc(p.attribution || p.source || 'Green space data')} · straight-line distance · ${esc(kind)} · ${esc(when)}</p>`;
+}
+
+/** European AQI band -> 0-30 points (the score's air-quality component). */
+function aqiBandPoints(aqi) {
+  if (aqi <= 20) return 30;
+  if (aqi <= 40) return 23;
+  if (aqi <= 60) return 15;
+  if (aqi <= 80) return 8;
+  return 3;
+}
+
+/** Postcode green context score, computed ONLY from C's three providers.
+ *  green access 0-40 = round(40 * (0.5 * min(count_within_2km / 5, 1) +
+ *                                     0.5 * (1 - min(nearest_distance_km, 2) / 2)))
+ *  where count_within_2km only counts the spaces the source actually returns —
+ *  the backend adapter caps that list at 5 (greenspace.MAX_RESULTS), so for
+ *  live data the count term is effectively constant; the component's scope
+ *  text states the cap. air quality 0-30 from the European AQI band,
+ *  electricity 0-30 = round(30 * clean_energy_percentage / 100). A total
+ *  appears only when all three providers answer; a missing provider is never
+ *  treated as zero. */
+function greenContextScore() {
+  const green = provider(state.environment, 'greenspace');
+  const air = provider(state.environment, 'air_quality');
+  const carbon = provider(state.environment, 'carbon_intensity');
+  const missing = [];
+
+  const distances = isFreshProvider(green) && Array.isArray(green.data)
+    ? green.data.map(pl => pl && finiteNumber(pl.distance_km)).filter(n => n !== null) : [];
+  let greenPoints = null;
+  if (distances.length) {
+    const within = distances.filter(km => km <= 2).length;
+    const nearest = Math.min(...distances);
+    greenPoints = Math.round(40 * (0.5 * Math.min(within / 5, 1) + 0.5 * (1 - Math.min(nearest, 2) / 2)));
+  } else {
+    const greenSource = (green && (green.source || green.attribution)) || 'OpenStreetMap Overpass API';
+    missing.push(providerGap(green, greenSource, 'answered with no named green spaces'));
+  }
+
+  const aqi = isFreshProvider(air) && air.data ? finiteNumber(air.data.aqi) : null;
+  if (aqi === null) {
+    const airSource = (air && (air.source || air.attribution)) || 'Open-Meteo Air Quality';
+    missing.push(providerGap(air, airSource, 'did not report an air-quality index'));
+  }
+
+  const clean = isFreshProvider(carbon) && carbon.data ? finiteNumber(carbon.data.clean_energy_percentage) : null;
+  if (clean === null) {
+    const carbonSource = (carbon && (carbon.source || carbon.attribution)) || 'NESO Carbon Intensity API';
+    missing.push(providerGap(carbon, carbonSource, 'did not report a clean-energy share'));
+  }
+
+  const components = [
+    {
+      key: 'greenspace', label: 'Green access', points: greenPoints, max: 40,
+      source: (green && (green.source || green.attribution)) || 'OpenStreetMap Overpass API',
+      scope: 'Mapped green spaces returned by the source (capped at 5) and distance to the nearest',
+      fixture: !!(green && green.source_kind === 'fixture'), capturedAt: green ? captureLabel(green.fetched_at) : null
+    },
+    {
+      key: 'air_quality', label: 'Air quality', points: aqi === null ? null : aqiBandPoints(aqi), max: 30,
+      source: (air && air.data && air.data.source) || (air && air.attribution) || 'Open-Meteo Air Quality',
+      scope: (air && air.data && air.data.scope) || 'Regional air-quality forecast',
+      fixture: !!(air && air.source_kind === 'fixture'), capturedAt: air ? captureLabel(air.fetched_at) : null
+    },
+    {
+      key: 'carbon_intensity', label: 'Clean electricity', points: clean === null ? null : Math.round(30 * clean / 100), max: 30,
+      source: (carbon && carbon.data && carbon.data.source) || (carbon && carbon.attribution) || 'NESO Carbon Intensity API',
+      scope: (carbon && carbon.data && carbon.data.scope) || 'Regional grid zone',
+      fixture: !!(carbon && carbon.source_kind === 'fixture'), capturedAt: carbon ? captureLabel(carbon.fetched_at) : null
+    }
+  ];
+  const available = components.every(c => c.points !== null);
+  const value = available ? components.reduce((sum, c) => sum + c.points, 0) : null;
+  return {
+    available, value, components, missing,
+    caveat: 'Regional public-data context for this postcode — a modelled estimate from public datasets, not a measurement of what this community’s actions have achieved.'
+  };
+}
+
+function contextScoreCard() {
+  const score = greenContextScore();
+  const rows = score.components.map(c => {
+    const points = c.points === null ? '—' : `<strong>${c.points}</strong>/${c.max}`;
+    const fixtureTag = c.fixture ? `<small class="fixture-tag">Demo fixture · ${esc(c.capturedAt || 'time not reported')}</small>` : '';
+    return `<li class="score-component ${c.points === null ? 'pending' : ''}"><div class="score-points">${points}</div><div class="score-detail"><b>${esc(c.label)}</b><small>${esc(c.source)}</small><small>${esc(c.scope)}</small>${fixtureTag}</div></li>`;
+  }).join('');
+  const total = score.available
+    ? `<strong>${score.value}</strong><span>/ 100</span>`
+    : '<strong class="pending">—</strong><span>/ 100</span>';
+  const pendingLine = score.available ? ''
+    : `<p class="score-pending">Total withheld until every source answers — ${esc(score.missing.join(' and '))}.</p>`;
+  const fixtureBanner = score.components.some(c => c.fixture)
+    ? '<p class="fixture-badge">Includes demo fixture data — a labelled sample snapshot, not a live query.</p>' : '';
+  return `<div class="context-score" id="green-context-score"><div class="score-heading"><span class="eyebrow">REGIONAL PUBLIC-DATA CONTEXT</span><h3>Postcode green context score</h3><div class="score-total">${total}</div></div><p class="score-caveat">${esc(score.caveat)}</p>${fixtureBanner}<ul class="score-components">${rows}</ul>${pendingLine}</div>`;
 }
 
 /* ------------------------------------------------------------------ task page */
