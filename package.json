@@ -1,0 +1,9 @@
+{
+  "name": "borrow-next-door-frontend",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "start": "node server.cjs",
+    "check": "node --check web/app.js && node --check web/integrations.js && node --check server.cjs"
+  }
+}

@@ -1,0 +1,28 @@
+const vm = require('node:vm');
+const fs = require('node:fs');
+const assert = require('node:assert/strict');
+const elements = new Map();
+function element(id) { if(!elements.has(id)) elements.set(id,{innerHTML:'',textContent:'',value:'',classList:{add(){},remove(){},toggle(){}},setAttribute(){},removeAttribute(){}});return elements.get(id); }
+const stored=new Map();
+const context=vm.createContext({console,URL,location:{hash:'#community',href:'http://localhost:5173'},crypto:require('node:crypto').webcrypto,localStorage:{getItem:k=>stored.get(k)||null,setItem:(k,v)=>stored.set(k,v)},setTimeout:()=>0,clearTimeout(){},document:{querySelector:element,querySelectorAll:()=>[],addEventListener(){}},window:{BND_INTEGRATIONS:{},addEventListener(){},scrollTo(){}}});
+vm.runInContext(fs.readFileSync('web/app.js','utf8'),context);
+const run=s=>vm.runInContext(s,context);
+assert.ok(element('#main').innerHTML.includes('A little sharing.'));
+run("borrow('t1')");
+assert.equal(run('state.loans.length'),1);
+assert.equal(run("state.tools.find(t=>t.id==='t1').status"),'reserved');
+run("borrow('t1')");assert.equal(run('state.loans.length'),1);
+run("transition(state.loans[0].id,'accepted')");assert.equal(run('state.loans[0].status'),'pending','borrower must not accept');
+run("user='bob';transition(state.loans[0].id,'returned')");assert.equal(run('state.loans[0].status'),'pending','cannot skip handover');
+run("transition(state.loans[0].id,'accepted');transition(state.loans[0].id,'on_loan');transition(state.loans[0].id,'returned')");
+assert.equal(run('state.loans[0].status'),'returned');
+assert.equal(run("state.tools.find(t=>t.id==='t1').status"),'available');
+assert.equal(run('state.tasks[0].status'),'planning','return must not complete task');
+run("user='alice';borrow('t2');transition(state.loans[1].id,'cancelled')");assert.equal(run("state.tools.find(t=>t.id==='t2').status"),'available');
+run("borrow('t3');user='bob';transition(state.loans[2].id,'rejected')");assert.equal(run("state.tools.find(t=>t.id==='t3').status"),'available');
+run("user='alice';filter='all';search='<script>'");assert.ok(run('toolCards()').includes('No tools match'));
+assert.equal(run("esc('<script>')"),'&lt;script&gt;');
+run("location.hash='#task';render()");assert.ok(element('#main').innerHTML.includes('Bring the tools together'));
+run("location.hash='#loans';render()");assert.ok(element('#main').innerHTML.includes('Returned'));
+assert.equal(JSON.parse(stored.get('bnd-demo-v1')).loans.length,3);
+console.log('PASS: page rendering, request reservation, duplicate prevention, owner checks, legal transitions, cancel/decline recovery, independent tasks, empty search, escaping, persistence.');
