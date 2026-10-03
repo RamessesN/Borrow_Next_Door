@@ -1,0 +1,24 @@
+[project]
+name = "borrow-next-door-backend"
+version = "0.1.0"
+description = "Borrow Next Door backend foundation: health, demo auth, shared contracts"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.142,<1.0",
+    "uvicorn>=0.54,<1.0",
+    "pydantic>=2.13,<3.0",
+    "httpx>=0.28,<1.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=9.1,<10.0"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["app", "app.routers", "app.adapters", "app.services"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

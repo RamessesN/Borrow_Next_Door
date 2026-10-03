@@ -1,8 +1,10 @@
 # C · 位置数据对接说明
 
-> **一句话：我只要 4 个数字字段和 1 个可选数组，你不用写任何新代码。**
+> **一句话：我只要 4 个数字字段；这些字段现在由 B 后端的适配器层（`backend/app/adapters/`）经 API 提供，你不用写任何新代码。**
 
-我的模块不会调用你的任何接口。它只是读别人放进对象里的 `latitude` / `longitude`。你把值填进去，任务清单上的「约 X km 直线距离」就出来了；不填，就只是不显示这一行，**其他功能一律正常，不会报错**。
+我的模块不会调用你的任何接口。它只是读 B 响应里对象上的 `latitude` / `longitude`（工具挂在 `community` 上，任务挂在 `place` 上）。值填进去，任务清单上的「约 X km 直线距离」就出来了；不填，就只是不显示这一行，**其他功能一律正常，不会报错**。
+
+> **2026-10-03 更新**：C 的实现已移植进 `backend/app/adapters/`（真实来源 postcodes.io / Open-Meteo / NESO / Overpass，短超时、失败降级、缓存标注 `source_kind`）。下文 §2 的接口实测记录是这些适配器的实现参考；§3 的接线位置已从 `web/app.js` 改为 B 后端适配器层，前端只消费 `GET /api/v1/tools?community_id=&radius_m=` 与 `GET /api/v1/communities/{id}/environment` 的响应。
 
 ## 1. 我需要的全部
 
@@ -13,6 +15,8 @@
 | `latitude` | `Tool`（= 出借者的社区中心点） | 出借者邮编的中心点 | 距离终点 | 该工具不显示距离 |
 | `longitude` | `Tool` | 同上 | 同上 | 同上 |
 | `nearbyPostcodes` | 传给 D 的 ctx（不是存在对象上） | 你决定，见 §3 | 同邮编没有工具时放宽到附近 | 只按同邮编匹配 |
+
+> **B 契约等价物**：B 的工具列表 `GET /api/v1/tools?community_id=<id>&radius_m=2000` 已在服务端做「同社区 + 2000m 半径」的放宽与排序，`distance_m` 为邮编中心点直线距离估计。前端不需要再自己拼 `nearbyPostcodes`；D 模块的 `nearbyPostcodes` 只在前端本地演示数据下仍有意义。
 
 就这些。**其余 API（空气、电力、EPC）跟我的模块没有关系**，见我给你的那封说明 · §5。
 
@@ -106,38 +110,23 @@ out center tags 5;
 - `[timeout:25]` 是查询自己的超时上限，和 HTTP 超时是两件事，两个都要设。
 - Overpass 是公益服务、会限流。**请服务端缓存**，不要每次页面刷新都打一次。
 
-## 3. 加进 app.js 的两处接线（不是你的文件）
+## 3. 接线位置（2026-10-03 更新：在 B 后端适配器层，不在 app.js）
 
-这两处是 `web/app.js` 里的，我可以帮你接，也可以你来。你需要知道的是「数据从哪进来」：
+C 的实现已移植进 `backend/app/adapters/`，前端不再自己拼坐标。数据流：
 
-**① `taskContext()` 要透传 `nearbyPostcodes`**
-
-```js
-function taskContext(task){
-  return { tools:state.tools, loans:state.loans, names, viewerId:user, task };
-  //                                          ↑ 需要加 nearbyPostcodes: nearby
-}
+```
+C 的适配器（backend/app/adapters/，真实来源 postcodes.io / Open-Meteo / NESO / Overpass）
+  → B 的环境服务（短超时、失败降级、缓存标注 source_kind）
+  → GET /api/v1/tools?community_id=&radius_m=（工具带 community 中心点 + distance_m）
+  → GET /api/v1/communities/{id}/environment（环境卡 envelope，见 §6）
+  → A 的 envCard / D 的距离行
 ```
 
-`nearbyPostcodes` 是 ctx 上的可选字段，不是存在对象上的。现在没传，所以匹配只在同邮编内进行。
+**① 工具坐标**：B 的 postcode 适配器在社区初始化时解析邮编中心点，工具响应的 `community.latitude` / `longitude` 即出借者社区中心点，`distance_m` 由服务端计算。前端不需要在发布表单里收坐标。
 
-**② 写入工具时要带上坐标**
+**② 任务地点坐标**：创建任务时 `place.latitude` / `longitude` 由 C 的绿地适配器（Overpass）结果经 B 校验后写入（距社区中心 ≤2000m，否则 422 `OUT_OF_RANGE`）。`D.createTask()` 的 `placeName` / `latitude` / `longitude` 参数保持不变，A 把 B 返回的 `place` 透传即可。
 
-```js
-// 现在：只有 postcode
-state.tools.unshift({ id, owner_id:user, name, description, category, status:'available', postcode });
-
-// 需要：加上出借者邮编的中心点
-state.tools.unshift({ …, postcode, latitude, longitude });
-```
-
-同一件事也适用于 `POST /api/tools` 之后由 B 写入的 tool 对象 —— 所以这条**也要告诉 B**，让他在建工具记录时把坐标一起存下来（否则每次读取都要重新查一次 Postcodes.io）。
-
-`task.latitude` / `task.longitude` 已经在 `D.createTask()` 里支持了，只要在创建任务时把绿地坐标传进去：
-
-```js
-D.createTask({ creatorId, templateId, postcode, placeName, latitude, longitude })
-```
+**③ 附近邮编放宽**：由 B 的 `radius_m`（100–2000）在服务端完成，见 §1 的说明。
 
 ## 4. 两条禁止
 
@@ -186,11 +175,36 @@ Overpass 返回的是**已映射**的绿地，不能拿来推断：
 
 ## 6. 环境卡片的返回格式（A 的 `envCard` 需要）
 
-空气、电力、绿地**各自独立加载、各自独立失败**，一个源挂了不能影响借还流程。`impactReport()` 不需要这些数据，但 A 的 `envCard` 需要你的返回里带来源标注：
+空气、电力、绿地**各自独立加载、各自独立失败**，一个源挂了不能影响借还流程。`impactReport()` 不需要这些数据，但 A 的 `envCard` 需要来源标注。
+
+**B 契约（2026-10-03 更新）**：`GET /api/v1/communities/{id}/environment` 返回聚合 envelope，各 provider 独立：
+
+```json
+{
+  "data": {
+    "status": "partial",
+    "providers": {
+      "postcode": {"status": "ok", "source_kind": "fixture", "attribution": "postcodes.io (fixture snapshot)"},
+      "air_quality": {"status": "unavailable", "error": "not_implemented"},
+      "carbon": {"status": "unavailable", "error": "not_implemented"},
+      "greenspace": {"status": "unavailable", "error": "not_implemented"}
+    }
+  },
+  "meta": {"request_id": "..."}
+}
+```
+
+要点：
+
+- 总状态 `ok` / `partial` / `unavailable`；每个 provider 独立 `status`（`ok` / `unavailable` / `not_implemented`）与 `source_kind`（`live` / `cached` / `fixture`）。**`source_kind` 不能省**——缓存数据必须标 `cached`，演示数据必须标 `fixture`。
+- **`scope` 语义不能丢**：空气是约 11 km 网格预测、电力是区域值，界面上必须显示成「区域信息」而不是「你家门口的实测值」。provider 的 `attribution` 字段就是给界面用的来源文案。
+- provider 未就绪（`not_implemented`）或上游失败（`unavailable`）时端点仍返回 200 带完整 envelope，A 按 provider 各自渲染降级态，不要给 `null` 让界面猜。
+
+以下为适配器内部 envelope（`backend/app/adapters/base.py` 的 `AdapterEnvelope`），A 不直接消费，供 C 实现参考：
 
 ```js
 {
-  status: "ok" | "unavailable" | "cached",
+  status: "ok" | "unavailable" | "not_implemented",
   value: 42,                        // 数值或对象
   unit: "μg/m³" | "gCO2/kWh",
   source: "Open-Meteo Air Quality",
@@ -200,16 +214,15 @@ Overpass 返回的是**已映射**的绿地，不能拿来推断：
 }
 ```
 
-要点：**`scope` 不能省。** 空气是约 11 km 网格预测、电力是区域值，界面上必须显示成「区域信息」而不是「你家门口的实测值」。失败时给 `status: "unavailable"` 加最后成功时间，不要给 `null` 让 A 猜。
-
-如果用了演示缓存，`status: "cached"` 并显示采集时间。用了示例绿地，界面上要明确标注是示例 —— 这跟演示数据的诚信要求有关。
+如果用了演示缓存，标 `source_kind: "cached"` 并显示采集时间。用了示例绿地，界面上要明确标注是示例 —— 这跟演示数据的诚信要求有关。
 
 ## 7. 验收清单
 
-- [ ] `POST /api/...` 之外，任何工具和任务对象上，坐标要么是数字要么是 `null`，**不要出现 `"55.947687"` 这种字符串**（我会当无效值丢掉）。
+- [ ] 任何工具和任务对象上，坐标要么是数字要么是 `null`，**不要出现 `"55.947687"` 这种字符串**（我会当无效值丢掉）。
 - [ ] 同一个邮编的两个工具，坐标一致（都来自邮编中心点）。**不要**给同一邮编的工具不同的坐标再期望我区分它们。
 - [ ] 坐标缺失时页面不报错，「约 X km」那一行只是不出现。
 - [ ] 距离文案里有「about」和「straight line」，没有任何地方出现「walk」「minute」。
 - [ ] 无效邮编 / 空结果有明确提示，页面可以恢复操作。
-- [ ] 把 Postcodes.io 断网（改 hosts 或断 wifi）后，任务清单、申请、借还流程**全部照常可用**。
-- [ ] Overpass 请求带了 User-Agent，且结果有服务端缓存。
+- [ ] 把 Postcodes.io 断网（改 hosts 或断 wifi）后，任务清单、申请、借还流程**全部照常可用**（B 的适配器失败降级为 `unavailable`，不抛出）。
+- [ ] Overpass 请求带了 User-Agent，且结果有服务端缓存（缓存条目标 `source_kind: "cached"`）。
+- [ ] 环境端点各 provider 独立失败：一个 provider 挂掉不影响其他 provider 与借还流程。
