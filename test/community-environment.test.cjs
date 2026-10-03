@@ -317,6 +317,40 @@ test('browsing recomputes the map from home to visible tools, respects filters a
   assert.doesNotMatch(app.html(), /walk|navigat|导航/i);
 });
 
+test('checking your own postcode keeps the home view instead of browsing', async () => {
+  const app = createApp();
+  await app.flush();
+  await signIn(app, 'alice');
+  inject(app, providers(GREEN, AIR, CARBON));
+  const home = app.run('state.me.community.postcode');
+  assert.equal(home, 'EH8 9AB');
+  app.element('#postcode').value = home;
+  app.submit('#postcode-form', {});
+  await app.flush();
+  assert.equal(app.run('state.browse'), null, 'the home postcode must not enter browsing mode');
+  assert.equal(app.element('#toast').textContent, `${home} is already your home street.`);
+  assert.doesNotMatch(app.html(), /id="back-home"/, 'no browse banner for the home postcode');
+  assert.doesNotMatch(app.html(), /Browsing /);
+});
+
+test('browsing another postcode and then checking your own returns to the home view', async () => {
+  const app = createApp();
+  await app.flush();
+  await signIn(app, 'alice');
+  inject(app, providers(GREEN, AIR, CARBON));
+  app.element('#postcode').value = 'EH14 4AS';
+  app.submit('#postcode-form', {});
+  await app.flush();
+  assert.ok(app.run('state.browse'), 'browsing another postcode sets the browse state');
+  assert.match(app.html(), /id="back-home"/);
+  app.element('#postcode').value = 'EH8 9AB';
+  app.submit('#postcode-form', {});
+  await app.flush();
+  assert.equal(app.run('state.browse'), null, 'checking the home postcode clears browsing');
+  assert.equal(app.element('#toast').textContent, 'Back to your street: EH8 9AB.');
+  assert.doesNotMatch(app.html(), /id="back-home"/, 'the browse banner is gone again');
+});
+
 /* -------------------------------------- boundary cases (reviewer findings) */
 
 test('European AQI band boundaries map to 30/23/15/8/3 at 20/40/60/80/81', async () => {
