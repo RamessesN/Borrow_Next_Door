@@ -42,7 +42,7 @@ let token = readStore(TOKEN_KEY);
 if (token) client.setToken(token);
 
 function freshState() {
-  return { me: null, templates: [], tools: [], tasks: [], loans: [], environment: null, impact: null, names: {} };
+  return { me: null, viewCommunity: null, templates: [], tools: [], tasks: [], loans: [], environment: null, impact: null, names: {} };
 }
 let state = freshState();
 let ui = { filter: 'all', search: '', loanTab: 'borrowed', busy: false, loading: false, message: '' };
@@ -69,16 +69,20 @@ async function loadAll() {
 }
 async function refresh() {
   const me = state.me;
-  const cid = me.community.id;
+  /* Identity stays home: tools, my tasks, both loan lists and publishing keep
+     the home community id. Only the environment/impact view follows the
+     postcode the user is currently looking at. */
+  const homeCid = me.community.id;
+  const viewCid = state.viewCommunity ? state.viewCommunity.id : homeCid;
   const [templates, tools, mine, community, borrower, owner, environment, impact] = await Promise.all([
     client.taskTemplates(),
-    client.listTools({ community_id: cid, radius_m: 2000, limit: 100 }),
+    client.listTools({ community_id: homeCid, radius_m: 2000, limit: 100 }),
     client.listTasks({ scope: 'mine', limit: 20 }),
-    soft(client.listTasks({ scope: 'community', community_id: cid, limit: 10 })),
+    soft(client.listTasks({ scope: 'community', community_id: viewCid, limit: 10 })),
     client.listLoans({ role: 'borrower', limit: 100 }),
     client.listLoans({ role: 'owner', limit: 100 }),
-    soft(client.communityEnvironment(cid)),
-    soft(client.communityImpact(cid))
+    soft(client.communityEnvironment(viewCid)),
+    soft(client.communityImpact(viewCid))
   ]);
   // Task summaries carry no requirements, so read the details we render.
   const ids = [...new Set([...mine, ...(community || [])].map(t => t.id))].slice(0, 12);
@@ -107,7 +111,16 @@ function slot(name, placeholder){const raw=window.BND_INTEGRATIONS?.[name];if(!r
 
 /* ------------------------------------------------------------------ routing */
 function page(){return ['community','task','loans'].includes(location.hash.slice(1))?location.hash.slice(1):'community';}
-const postcode = () => (state.me ? state.me.community.postcode : '');
+/* The home community owns the account's identity, tools, loans and actions.
+   `state.viewCommunity` (null = home) only moves the environment, green-space
+   and impact view onto a postcode the user typed: postcode()/outcode() follow
+   the view, while homePostcode() always names the home community
+   for identity-scoped surfaces. */
+const homeCommunity = () => (state.me ? state.me.community : null);
+const homePostcode = () => { const c = homeCommunity(); return c ? c.postcode : ''; };
+const viewPoint = () => state.viewCommunity || homeCommunity();
+const postcode = () => { const c = viewPoint(); return c ? c.postcode : ''; };
+const outcode = () => { const c = viewPoint(); return c ? c.outcode : ''; };
 const myTasks = () => state.tasks.filter(t => state.me && t.creator && t.creator.id === state.me.id);
 const myOpenTask = () => myTasks().filter(t => t.status === 'open')
   .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))[0] || null;
@@ -216,11 +229,38 @@ function provider(env, key) {
   if (env.providers && env.providers[key]) return env.providers[key];
   return env[key] || null;
 }
+/* Air and electricity are regional estimates, so two nearby postcodes can
+   legitimately read the same. Each card shows the provider's own number with
+   its stated scope as the headline, the source attribution as the small print,
+   and a pending '—' (never 0) when the provider has not answered or reported
+   no number. */
+const ENV_READING = {
+  air_quality: { field: 'aqi', unit: 'AQI', scope: 'Regional forecast (~11km grid)' },
+  carbon_intensity: { field: 'clean_energy_percentage', unit: '% clean electricity', scope: 'Regional grid zone' }
+};
 function envCard(icon, title, providerKey, source) {
   const p = provider(state.environment, providerKey);
-  const ok = !!p && (p.status === 'ok' || p.status === 'cached');
-  const detail = ok ? (p.attribution || p.source || 'Connected') : `${source} · awaiting provider`;
-  const inner = `<span class="env-icon">${icon}</span><div><h3>${title}</h3><strong>${ok ? esc(String(p.attribution || 'Connected').slice(0, 30)) : 'Awaiting data'}</strong><span class="status-tag">${ok ? 'Connected' : 'Not connected'}</span><p>${esc(detail)}</p></div>`;
+  const spec = ENV_READING[providerKey] || { field: null, unit: '', scope: '' };
+  const ok = isFreshProvider(p);
+  const value = ok && p.data && spec.field ? finiteNumber(p.data[spec.field]) : null;
+  let headline, detail, tag, subline;
+  if (value !== null) {
+    headline = `<strong>${esc(String(value))}</strong> <span class="env-unit">${esc(spec.unit)}</span>`;
+    detail = (p.data && p.data.scope) || spec.scope;
+    tag = 'Connected';
+    subline = p.attribution || p.source || source;
+  } else if (ok) {
+    headline = '<strong class="pending">—</strong>';
+    detail = `${(p.data && p.data.scope) || spec.scope} · no number reported yet`;
+    tag = 'Connected';
+    subline = p.attribution || p.source || source;
+  } else {
+    headline = '<strong class="pending">—</strong>';
+    detail = `${source} · awaiting provider`;
+    tag = 'Not connected';
+    subline = '';
+  }
+  const inner = `<span class="env-icon">${icon}</span><div><h3>${title}</h3>${headline}<span class="status-tag">${tag}</span><p>${esc(detail)}</p>${subline ? `<p class="env-source">${esc(subline)}</p>` : ''}</div>`;
   return `<div class="env-card">${slot(title === 'The air around you' ? 'air' : 'electricity', inner)}</div>`;
 }
 function toolCards() {
@@ -230,7 +270,7 @@ function toolCards() {
     (ui.filter === 'all' || ui.filter === 'available' && t.availability === 'available' ||
      ui.filter === 'garden' && groupOf(t.category) === 'garden' ||
      ui.filter === 'cleanup' && groupOf(t.category) === 'cleanup'));
-  if (!tools.length) return `<div class="empty"><h3>A little room for sharing.</h3><p>No tools match this search in ${esc(postcode())}.</p><button class="btn secondary" data-publish>Lend the first tool ↗</button></div>`;
+  if (!tools.length) return `<div class="empty"><h3>A little room for sharing.</h3><p>No tools match this search in ${esc(homePostcode())}.</p><button class="btn secondary" data-publish>Lend the first tool ↗</button></div>`;
   return tools.map(t => {
     const own = me && t.owner.id === me.id;
     const statusLabel = { available: 'Ready to share', reserved: 'Reserved', on_loan: 'Out helping', archived: 'Archived' }[t.availability] || t.availability;
@@ -238,12 +278,25 @@ function toolCards() {
     return `<article class="tool-card"><div class="tool-art ${esc(SVG_KEY[t.category] || 'spade')}">${toolSVG(SVG_KEY[t.category])}<span class="tool-status ${t.availability === 'available' ? '' : 'busy'}"><i></i>${esc(statusLabel)}</span></div><div class="tool-body"><h3>${esc(t.name)}</h3><span class="tool-owner">${esc(t.owner.display_name)}’s tool · ${esc(t.community.postcode)}${distance}</span><div class="tool-bottom"><span>Free to borrow</span><button data-borrow="${esc(t.id)}" ${t.availability !== 'available' || own ? 'disabled' : ''}>${own ? 'Your tool' : t.availability === 'available' ? 'Borrow ↗' : 'Unavailable'}</button></div></div></article>`;
   }).join('');
 }
+function postcodeMessage() {
+  return state.viewCommunity
+    ? `Viewing ${postcode()} (${outcode()}) · your tools stay in ${homePostcode()}`
+    : `Your community: ${homePostcode()} · served by the backend`;
+}
+/* Visible disclosure + escape hatch: environment, green spaces and impact
+   follow the viewed postcode, but the demo account's tools, actions and loans
+   never leave the home community. */
+function viewNotice() {
+  const v = state.viewCommunity;
+  if (!v) return '';
+  return `<div class="view-notice" role="status"><span class="view-chip">⌖ Viewing <strong>${esc(v.postcode)}</strong></span><span class="view-copy">Environment, green spaces and impact below are for ${esc(v.postcode)}. Your demo account’s tools, actions and loans stay in ${esc(homePostcode())}.</span><button type="button" class="view-reset" data-view-reset>Reset to ${esc(homePostcode())}</button></div>`;
+}
 function community() {
   const me = state.me;
   const banner = state.impact;
-  return `<section class="hero"><div class="hero-copy"><span class="location"><i></i> Small actions. Right on your doorstep.</span><h1>A little sharing.<br>A <em>greener</em><br>neighbourhood.</h1><p>The tools you need might be just next door.<br>Borrow, lend, and make your patch a little better.</p><form class="postcode-form" id="postcode-form"><span aria-hidden="true">⌖</span><input id="postcode" aria-label="Your UK postcode" value="${esc(postcode())}" maxlength="10" required><button type="submit">Check a postcode ↗</button></form><p class="field-message" id="postcode-message">Your community: ${esc(postcode())} · served by the backend</p></div><div class="hero-art">${gardenArt()}<span class="art-note">Good things grow together.</span><div class="art-label"><div class="mini-avatars"><span>A</span><span>B</span><span>♡</span></span><span>Less buying. More belonging.</span></div></div></section>
-<section><div class="section-heading"><div><h2>A small look at your local patch</h2><p>Environmental context for ${esc(postcode())} — reported per provider by the API.</p></div><span class="eyebrow">YOUR POSTCODE, TOGETHER</span></div><div class="environment">${envCard('≋','The air around you','air_quality','Open-Meteo')}${envCard('ϟ','Your regional electricity','carbon_intensity','NESO Carbon Intensity')}<div class="env-card"><span class="env-icon">♧</span><div><h3>Room to grow</h3><strong>${esc(greenspaceLabel())}</strong><p>Green spaces near ${esc(me.community.outcode)}</p></div></div></div>${contextScoreCard()}</section>
-<div class="workspace"><section><div class="section-heading"><div><h2>Good tools. Great neighbours.</h2><p>Something sitting in your shed could start something good.</p></div><button class="btn secondary" data-publish>＋ Lend a tool</button></div><div class="filterbar"><div class="filters">${[['all','All tools'],['garden','Gardening'],['cleanup','Clean-up'],['available','Available']].map(([v,l])=>`<button class="chip ${ui.filter===v?'active':''}" data-filter="${v}">${l}</button>`).join('')}</div><input class="search-input" id="tool-search" value="${esc(ui.search)}" placeholder="Search tools…" aria-label="Search tools"></div><div class="tool-grid" id="tool-grid">${toolCards()}</div></section><aside><div class="action-card"><span class="eyebrow">LET’S DO SOME GOOD</span><span class="flower">✳</span><h2>A greener street<br>starts with us.</h2><p>Pick a small action. Find the tools.<br>Make a difference, together.</p><a class="btn primary" href="#task">Start a community action <span>↗</span></a></div><div class="map-card"><h3>⌖ Green spaces nearby</h3>${slot('map', greenSpacePanel())}</div></aside></div><div class="bottom-banner"><span>✳</span><div><strong>The more we share, the more we can do.</strong><p>${banner ? `${banner.active_tools_count} tools shared · ${banner.returned_loans_count} returned loans · ${banner.completed_tasks_count} completed actions in ${esc(me.community.outcode)}.` : 'A missing litter picker today. A whole community clean-up tomorrow.'}</p></div><button class="text-button" data-publish>Be someone’s helpful neighbour ↗</button></div>`;
+  return `<section class="hero"><div class="hero-copy"><span class="location"><i></i> Small actions. Right on your doorstep.</span><h1>A little sharing.<br>A <em>greener</em><br>neighbourhood.</h1><p>The tools you need might be just next door.<br>Borrow, lend, and make your patch a little better.</p><form class="postcode-form" id="postcode-form"><span aria-hidden="true">⌖</span><input id="postcode" aria-label="Your UK postcode" value="${esc(postcode())}" maxlength="10" required><button type="submit">Check a postcode ↗</button></form><p class="field-message" id="postcode-message">${esc(postcodeMessage())}</p>${viewNotice()}</div><div class="hero-art">${gardenArt()}<span class="art-note">Good things grow together.</span><div class="art-label"><div class="mini-avatars"><span>A</span><span>B</span><span>♡</span></span><span>Less buying. More belonging.</span></div></div></section>
+<section><div class="section-heading"><div><h2>A small look at your local patch</h2><p>Regional estimates for ${esc(postcode())} — two nearby postcodes can legitimately share a value (reported per provider by the API).</p></div><span class="eyebrow">YOUR POSTCODE, TOGETHER</span></div><div class="environment">${envCard('≋','The air around you','air_quality','Open-Meteo')}${envCard('ϟ','Your regional electricity','carbon_intensity','NESO Carbon Intensity')}<div class="env-card"><span class="env-icon">♧</span><div><h3>Room to grow</h3><strong>${esc(greenspaceLabel())}</strong><p>Green spaces near ${esc(outcode())}</p></div></div></div>${contextScoreCard()}</section>
+<div class="workspace"><section><div class="section-heading"><div><h2>Good tools. Great neighbours.</h2><p>Something sitting in your shed could start something good.</p></div><button class="btn secondary" data-publish>＋ Lend a tool</button></div><div class="filterbar"><div class="filters">${[['all','All tools'],['garden','Gardening'],['cleanup','Clean-up'],['available','Available']].map(([v,l])=>`<button class="chip ${ui.filter===v?'active':''}" data-filter="${v}">${l}</button>`).join('')}</div><input class="search-input" id="tool-search" value="${esc(ui.search)}" placeholder="Search tools…" aria-label="Search tools"></div><div class="tool-grid" id="tool-grid">${toolCards()}</div></section><aside><div class="action-card"><span class="eyebrow">LET’S DO SOME GOOD</span><span class="flower">✳</span><h2>A greener street<br>starts with us.</h2><p>Pick a small action. Find the tools.<br>Make a difference, together.</p><a class="btn primary" href="#task">Start a community action <span>↗</span></a></div><div class="map-card"><h3>⌖ Green spaces nearby</h3>${slot('map', greenSpacePanel())}</div></aside></div><div class="bottom-banner"><span>✳</span><div><strong>The more we share, the more we can do.</strong><p>${banner ? `${banner.active_tools_count} tools shared · ${banner.returned_loans_count} returned loans · ${banner.completed_tasks_count} completed actions in ${esc(outcode())}.` : 'A missing litter picker today. A whole community clean-up tomorrow.'}</p></div><button class="text-button" data-publish>Be someone’s helpful neighbour ↗</button></div>`;
 }
 function greenspaceLabel() {
   const p = provider(state.environment, 'greenspace');
@@ -283,7 +336,7 @@ function greenSpacePanel() {
   if (!places.length) {
     const source = (p && (p.source || p.attribution)) || 'OpenStreetMap Overpass API';
     const detail = providerGap(p, source, 'answered with no named green spaces');
-    return `<div class="map-placeholder"><span class="map-symbol">⌑</span><b>Green spaces near ${esc(state.me.community.outcode)}</b><small>${esc(detail)}.</small></div>`;
+    return `<div class="map-placeholder"><span class="map-symbol">⌑</span><b>Green spaces near ${esc(outcode())}</b><small>${esc(detail)}.</small></div>`;
   }
   const nearestFirst = places.slice().sort((a, b) => (finiteNumber(a.distance_km) ?? Infinity) - (finiteNumber(b.distance_km) ?? Infinity));
   const rows = nearestFirst.map(pl => {
@@ -415,11 +468,13 @@ function wantedStrip(board) {
 }
 function impactPanel(report) {
   const cells = report.metrics.map(m => `<div class="impact-metric ${m.available ? '' : 'pending'}"><strong>${m.available ? m.value : '—'}</strong><small>${esc(m.label)}</small><span class="status-tag">${m.available ? esc(m.basis) : 'Not collected yet'}</span></div>`).join('');
+  // These counters follow the viewed community, so every label names that
+  // outcode; none of them may read as the viewer's own community.
   const comm = state.impact ? `
-    <div class="impact-metric"><strong>${state.impact.active_tools_count}</strong><small>Tools shared in your community</small><span class="status-tag">backend</span></div>
-    <div class="impact-metric"><strong>${state.impact.returned_loans_count}</strong><small>Loans returned (all neighbours)</small><span class="status-tag">backend</span></div>
-    <div class="impact-metric"><strong>${state.impact.completed_tasks_count}</strong><small>Actions recorded (all neighbours)</small><span class="status-tag">backend</span></div>` : '';
-  const asOf = state.impact ? `<p class="muted">Community counters as of ${esc(state.impact.as_of)}.</p>` : '';
+    <div class="impact-metric"><strong>${state.impact.active_tools_count}</strong><small>Tools shared in ${esc(outcode())}</small><span class="status-tag">backend</span></div>
+    <div class="impact-metric"><strong>${state.impact.returned_loans_count}</strong><small>Loans returned (all ${esc(outcode())} neighbours)</small><span class="status-tag">backend</span></div>
+    <div class="impact-metric"><strong>${state.impact.completed_tasks_count}</strong><small>Actions recorded (all ${esc(outcode())} neighbours)</small><span class="status-tag">backend</span></div>` : '';
+  const asOf = state.impact ? `<p class="muted">Counters for ${esc(outcode())} as of ${esc(state.impact.as_of)}.</p>` : '';
   return `<div class="outcomes">${cells}${comm}</div><p class="notice">${esc(report.disclaimer)}</p><p class="muted">Scope: ${esc(report.scope)}.</p>${asOf}`;
 }
 function taskPage() {
@@ -432,7 +487,10 @@ function taskPage() {
   const progress = task ? D.taskProgress(task, ctx) : null;
   const readiness = task ? D.outcomeReadiness(task, ctx) : null;
   const report = D.impactReport(state.tasks, state.loans, { communityId: state.me.community.id, tools: state.tools, names: state.names });
-  const board = D.wantedBoard(state.tasks, ctx);
+  // The wanted board is only useful if a home neighbour can fill the gap, so
+  // it never lists tasks that belong to the community currently being viewed.
+  const homeTasks = state.tasks.filter(t => t && t.community_id === state.me.community.id);
+  const board = D.wantedBoard(homeTasks, ctx);
   const recorded = storyTask && storyTask.outcome;
   const templateButtons = state.templates.length
     ? state.templates.map(t => {
@@ -450,7 +508,7 @@ function taskPage() {
       ? `<p class="muted">Recorded ${esc(String(storyTask.completed_at || '').slice(0, 16).replace('T', ' '))} UTC.</p><label>Your outcome<textarea id="outcome-note" readonly>${esc(recorded ? recorded.note : '')}</textarea></label><div class="impact-fields"><label>Bags collected<input id="impact-bags" type="number" value="${recorded && recorded.bags_collected !== null ? recorded.bags_collected : ''}" readonly></label><label>Volunteer minutes<input id="impact-minutes" type="number" value="${recorded && recorded.volunteer_minutes !== null ? recorded.volunteer_minutes : ''}" readonly></label></div><p class="notice">Self-reported by the organiser. Returns are counted separately from this report.</p>`
       : `<p class="muted">Finished your action? Record what you did. A returned tool does not complete an action.</p><label>Your outcome<textarea id="outcome-note" maxlength="500" placeholder="What did you do for your neighbourhood?"></textarea></label><div class="impact-fields"><label>Bags collected<input id="impact-bags" type="number" min="0" step="1" value=""></label><label>Volunteer minutes<input id="impact-minutes" type="number" min="0" step="5" value=""></label></div>${readiness && readiness.warning ? `<p class="notice">${esc(readiness.warning)}</p>` : ''}<button class="btn primary" id="complete-task" ${readiness && !readiness.canSubmit ? 'disabled' : ''}>Record completed action ↗</button><p class="muted">Completion is self-reported by the organiser.</p>`;
   const place = task
-    ? `<label>Where are we helping?<input id="place-name" value="${esc(task.place.name)}" maxlength="120" readonly></label><p class="notice">Meeting point saved with the action by the backend (within 2 km of ${esc(postcode())}).</p>`
+    ? `<label>Where are we helping?<input id="place-name" value="${esc(task.place.name)}" maxlength="120" readonly></label><p class="notice">Meeting point saved with the action by the backend (within 2 km of ${esc(homePostcode())}).</p>`
     : `<p class="notice">Nothing is saved until you pick an action. The meeting point is fixed to your community when the action is created.</p>`;
   return `<div class="page-heading"><span class="eyebrow">SMALL ACTIONS, SHARED POSSIBILITIES</span><h1>Let's make something <em>good.</em></h1><p>Choose an action and bring the right tools together.</p></div><div class="task-layout"><div><section class="panel"><h2>01 / Pick your little project</h2><div class="template-options">${templateButtons}</div>${place}</section><section class="panel"><h2>02 / Bring the tools together</h2>${slot('tasks', checklist)}</section></div><aside><section class="panel"><span class="eyebrow">EVERY STEP COUNTS</span><h2 style="margin-top:15px">03 / Tell the story</h2>${story}</section><section class="panel"><h2>Little actions, adding up.</h2>${slot('outcomes', impactPanel(report))}</section></aside></div>`;
 }
@@ -465,7 +523,7 @@ function loansPage() {
   return `<div class="page-heading"><span class="eyebrow">SHARED TOOLS. SHARED TRUST.</span><h1>A little give. A little <em>borrow.</em></h1><p>Keep track of the tools making good things happen.</p></div><div class="filters">${[['borrowed','I’m borrowing'],['lent','I’m lending']].map(([v,l])=>`<button class="chip ${ui.loanTab===v?'active':''}" data-loan-tab="${v}">${l}</button>`).join('')}</div><div class="timeline"><span>01 Request sent</span>→<span>02 Reservation accepted</span>→<span>03 Handed over</span>→<span>04 Return confirmed</span></div>${loans.length ? loans.map(l => {
     const isOwner = l.owner_id === me.id;
     const tool = toolOf(l.tool_id);
-    const postcodeOf = tool ? tool.community.postcode : postcode();
+    const postcodeOf = tool ? tool.community.postcode : homePostcode();
     const btn = (action, cls, label) => `<button class="btn ${cls} small" data-transition="${action}" data-id="${esc(l.id)}">${label}</button>`;
     let actions = '';
     if (l.status === 'pending') actions = isOwner
@@ -491,7 +549,7 @@ function render() {
   const active = state.loans.filter(l => ['pending', 'accepted', 'on_loan'].includes(l.status) && (l.borrower_id === state.me.id || l.owner_id === state.me.id)).length;
   const lc = $('#loan-count'); if (lc) lc.textContent = String(active);
   const av = $('#avatar'); if (av) av.textContent = (state.me.display_name || '?')[0];
-  const who = $('#whoami'); if (who) who.textContent = `${state.me.display_name} · ${state.me.community.outcode}`;
+  const who = $('#whoami'); if (who) who.textContent = `${state.me.display_name} · ${homeCommunity().outcode}`;
 }
 
 /* ----------------------------------------------------------------- actions */
@@ -536,13 +594,32 @@ async function postcodeSubmit(form, btn) {
   if (!value) return;
   await action(btn, async () => {
     const community = await client.resolveCommunity(value);
-    const msg = $('#postcode-message');
-    if (msg) { msg.classList.remove('error'); msg.textContent = `${community.postcode} resolves to a community (${community.outcode}). Your demo account stays in ${postcode()}.`; }
-    toast(`That postcode is real: ${community.postcode}.`);
+    const home = homeCommunity();
+    // Typing the home postcode is not "viewing": clear the view so the page
+    // reads as the home community instead of a pointless "Viewing EH8 9AB …
+    // stay in EH8 9AB".
+    const isHome = !!home && community.id === home.id;
+    state.viewCommunity = isHome ? null : { id: community.id, postcode: community.postcode, outcode: community.outcode };
+    await refresh();
+    render();
+    toast(isHome
+      ? `Back to your community: ${homePostcode()}.`
+      : `Showing ${community.postcode}. Your demo account's tools stay in ${homePostcode()}.`);
   }, { onError: err => {
+    // Show the failure, then repaint immediately so the field message snaps
+    // back to the current view instead of staying stuck on the error text.
     const msg = $('#postcode-message');
     if (msg) { msg.textContent = err.message; msg.classList.add('error'); }
+    render();
   } });
+}
+async function resetView(btn) {
+  await action(btn, async () => {
+    state.viewCommunity = null;
+    await refresh();
+    render();
+    toast(`Back to your community: ${homePostcode()}.`);
+  });
 }
 async function chooseTemplate(templateId, btn) {
   const open = myOpenTask();
@@ -636,7 +713,7 @@ document.addEventListener('click', e => {
   if (el.matches('[data-publish]')) {
     const owner = $('#publish-owner'), pc = $('#publish-postcode');
     if (owner) owner.textContent = state.me ? nameOf(state.me.id) : '';
-    if (pc) pc.textContent = postcode();
+    if (pc) pc.textContent = homePostcode();
     const dlg = $('#publish-dialog'); if (dlg) dlg.showModal();
     return;
   }
@@ -645,6 +722,7 @@ document.addEventListener('click', e => {
   if (el.dataset.transition) { transition(el.dataset.id, el.dataset.transition, el); return; }
   if (el.dataset.loanTab) { ui.loanTab = el.dataset.loanTab; render(); return; }
   if (el.dataset.template) { chooseTemplate(el.dataset.template, el); return; }
+  if ('viewReset' in el.dataset) { resetView(el); return; }
   if (el.id === 'integration-open') { const d = $('#integration-dialog'); if (d) d.showModal(); return; }
   if (el.id === 'retry-boot') { boot(); return; }
   if (el.id === 'logout') { signOut(el); return; }

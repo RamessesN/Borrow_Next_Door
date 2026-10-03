@@ -48,6 +48,19 @@ function createMockBackend(options) {
   const TOOL_CATEGORIES = ['litter_picker', 'reusable_gloves', 'watering_can', 'hand_trowel'];
 
   const db = { tools: [], tasks: [], loans: [], events: [] };
+  /* Optional extra communities the app may view by typing their postcode:
+     options.viewCommunities = { 'EH16 5AA': { community, environment, impact } }.
+     When absent, resolve keeps returning the single home community, so tests
+     that never exercise the viewing flow are unchanged. */
+  const viewCommunities = options.viewCommunities || {};
+  const homeEnvironment = () => options.environment || environmentPayload();
+  const homeImpact = () => options.impact || impactPayload();
+  const normalisePostcode = value => String(value || '').toUpperCase().replace(/\s+/g, ' ').trim();
+  const viewKeyForPostcode = value => Object.keys(viewCommunities)
+    .find(key => normalisePostcode(key) === normalisePostcode(value)) || null;
+  const viewForId = id => Object.keys(viewCommunities)
+    .map(key => viewCommunities[key])
+    .find(view => view && view.community && view.community.id === id) || null;
   const sessions = new Map();   // token -> {alias, valid}
   const idem = new Map();       // user:key -> {fingerprint, status, body}
   const calls = [];             // every request the client made
@@ -428,19 +441,25 @@ function createMockBackend(options) {
 
     /* ------------------------------------------------------- community --- */
     if (path === '/communities/resolve' && method === 'GET') {
-      const value = (parsed.searchParams.get('postcode') || '').toUpperCase().replace(/\s+/g, ' ').trim();
+      const value = normalisePostcode(parsed.searchParams.get('postcode'));
       if (!/^(GIR 0AA|[A-Z]{1,2}\d[A-Z\d]? \d[A-Z]{2})$/.test(value)) return fail(422, 'INVALID_POSTCODE', 'That postcode could not be resolved.');
+      const key = viewKeyForPostcode(value);
+      if (key) return ok(Object.assign({}, viewCommunities[key].community, { postcode: value }));
       return ok(Object.assign({}, community, { postcode: value }));
     }
     m = path.match(/^\/communities\/([^/]+)\/environment$/);
     if (m && method === 'GET') {
-      if (m[1] !== community.id) return fail(404, 'NOT_FOUND', 'Community not found.');
-      return ok(environmentPayload());
+      if (m[1] === community.id) return ok(homeEnvironment());
+      const view = viewForId(m[1]);
+      if (view) return ok(view.environment || environmentPayload());
+      return fail(404, 'NOT_FOUND', 'Community not found.');
     }
     m = path.match(/^\/communities\/([^/]+)\/impact$/);
     if (m && method === 'GET') {
-      if (m[1] !== community.id) return fail(404, 'NOT_FOUND', 'Community not found.');
-      return ok(impactPayload());
+      if (m[1] === community.id) return ok(homeImpact());
+      const view = viewForId(m[1]);
+      if (view) return ok(view.impact || impactPayload());
+      return fail(404, 'NOT_FOUND', 'Community not found.');
     }
 
     return fail(404, 'NOT_FOUND', `No route for ${method} ${path}.`);
