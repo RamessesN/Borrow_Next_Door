@@ -11,6 +11,8 @@ const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt
 /* Member D's task module owns templates, tool matching and impact. Loaded first. */
 const D = window.BND_TASK || globalThis.BND_TASK;
 if (!D) throw new Error('web/task-module.js must be loaded before app.js');
+const M = window.BND_MAP || globalThis.BND_MAP;
+if (!M) throw new Error('web/map-module.js must be loaded before app.js');
 const API = window.BND_API || globalThis.BND_API;
 if (!API) throw new Error('web/api.js must be loaded before app.js');
 const client = API.createClient({ baseUrl: window.BND_API_BASE || globalThis.BND_API_BASE });
@@ -52,7 +54,7 @@ function freshState() {
   };
 }
 let state = freshState();
-let ui = { filter: 'all', search: '', loanTab: 'borrowed', selectedTaskId: null, busy: false, loading: false, message: '' };
+let ui = { filter: 'all', search: '', loanTab: 'borrowed', selectedTaskId: null, selectedPlaceId: null, selectedPlaceCommunityId: null, busy: false, loading: false, message: '' };
 let toastTimer;
 function toast(message) { $('#toast').textContent = message; $('#toast').classList.add('visible'); clearTimeout(toastTimer); toastTimer = setTimeout(() => $('#toast').classList.remove('visible'), 5200); }
 
@@ -192,6 +194,7 @@ function setLoginMessage(message) {
 }
 function clearSession() {
   ui.selectedTaskId = null;
+  ui.selectedPlaceId = null; ui.selectedPlaceCommunityId = null;
   dropStore(TOKEN_KEY); dropStore(USER_KEY);
   token = null; client.setToken(null);
 }
@@ -225,8 +228,19 @@ function handleError(err, opts) {
     renderLogin('Your session has expired. Please sign in again.');
     return;
   }
+  const FRIENDLY = {
+    OUT_OF_RANGE: 'That tool is in another neighbourhood. Borrowing works within 2 km — browsing is fine.',
+    TOOL_UNAVAILABLE: 'This tool is already reserved or on loan.',
+    TOOL_ARCHIVED: 'That tool is no longer listed.',
+    SELF_BORROW_FORBIDDEN: 'That is your own tool — a neighbour has to borrow it.',
+    REQUIREMENT_OCCUPIED: 'Another request already covers that slot.',
+    REQUIREMENT_LOCKED: 'That slot is locked (already requested or used).',
+    FORBIDDEN: 'You do not have permission for that action.'
+  };
   if (opts && typeof opts.onError === 'function') opts.onError(err);
-  toast(err && err.message ? err.message : 'Something went wrong. Please try again.');
+  const code = err && err.code;
+  const verbatim = err && err.status === 422 && opts && opts.verbatim422;
+  toast((verbatim ? err.message : code && FRIENDLY[code]) || (err && err.message) || 'Something went wrong. Please try again.');
 }
 /** Disable everything, run one user intent, surface server errors, then repaint
  *  only on success — so a failed form keeps what the user typed. */
@@ -253,20 +267,45 @@ function provider(env, key) {
   if (env.providers && env.providers[key]) return env.providers[key];
   return env[key] || null;
 }
+const ENV_READING = {
+  air_quality: { field: 'aqi', unit: 'AQI', scope: 'Regional forecast (~11km grid)' },
+  carbon_intensity: { field: 'clean_energy_percentage', unit: '% clean electricity', scope: 'Regional grid zone' }
+};
 function envCard(icon, title, providerKey, source) {
   const p = provider(visibleEnvironment(), providerKey);
-  const ok = !!p && (p.status === 'ok' || p.status === 'cached');
-  const detail = ok ? (p.attribution || p.source || 'Connected') : `${source} · awaiting provider`;
-  const inner = `<span class="env-icon">${icon}</span><div><h3>${title}</h3><strong>${ok ? esc(String(p.attribution || 'Connected').slice(0, 30)) : 'Awaiting data'}</strong><span class="status-tag">${ok ? 'Connected' : 'Not connected'}</span><p>${esc(detail)}</p></div>`;
+  const spec = ENV_READING[providerKey] || { field: null, unit: '', scope: '' };
+  const ok = isFreshProvider(p);
+  const value = ok && p.data && spec.field ? finiteNumber(p.data[spec.field]) : null;
+  let headline, detail, tag, subline;
+  if (value !== null) {
+    headline = `<strong>${esc(String(value))}</strong> <span class="env-unit">${esc(spec.unit)}</span>`;
+    detail = (p.data && p.data.scope) || spec.scope;
+    tag = 'Connected';
+    subline = p.attribution || p.source || source;
+  } else if (ok) {
+    headline = '<strong class="pending">—</strong>';
+    detail = `${(p.data && p.data.scope) || spec.scope} · no number reported yet`;
+    tag = 'Connected';
+    subline = p.attribution || p.source || source;
+  } else {
+    headline = '<strong class="pending">—</strong>';
+    detail = `${source} · awaiting provider`;
+    tag = 'Not connected';
+    subline = '';
+  }
+  const inner = `<span class="env-icon">${icon}</span><div><h3>${title}</h3>${headline}<span class="status-tag">${tag}</span><p>${esc(detail)}</p>${subline ? `<p class="env-source">${esc(subline)}</p>` : ''}</div>`;
   return `<div class="env-card">${slot(title === 'The air around you' ? 'air' : 'electricity', inner)}</div>`;
 }
-function toolCards() {
-  const me = state.me;
-  const tools = visibleTools().filter(t => t.availability !== 'archived' &&
+function listedTools() {
+  return visibleTools().filter(t => t.availability !== 'archived' &&
     String(t.name || '').toLowerCase().includes(ui.search.toLowerCase()) &&
     (ui.filter === 'all' || ui.filter === 'available' && t.availability === 'available' ||
      ui.filter === 'garden' && groupOf(t.category) === 'garden' ||
      ui.filter === 'cleanup' && groupOf(t.category) === 'cleanup'));
+}
+function toolCards() {
+  const me = state.me;
+  const tools = listedTools();
   if (!tools.length) {
     const where = esc(postcode());
     return state.browse
@@ -277,7 +316,8 @@ function toolCards() {
     const own = me && t.owner.id === me.id;
     const statusLabel = { available: 'Ready to share', reserved: 'Reserved', on_loan: 'Out helping', archived: 'Archived' }[t.availability] || t.availability;
     const distance = typeof t.distance_m === 'number' ? `<span class="muted"> · about ${Math.round(t.distance_m)} m away</span>` : '';
-    return `<article class="tool-card"><div class="tool-art ${esc(SVG_KEY[t.category] || 'spade')}">${toolSVG(SVG_KEY[t.category])}<span class="tool-status ${t.availability === 'available' ? '' : 'busy'}"><i></i>${esc(statusLabel)}</span></div><div class="tool-body"><h3>${esc(t.name)}</h3><span class="tool-owner">${esc(t.owner.display_name)}’s tool · ${esc(t.community.postcode)}${distance}</span><div class="tool-bottom"><span>Free to borrow</span><button data-borrow="${esc(t.id)}" ${t.availability !== 'available' || own ? 'disabled' : ''}>${own ? 'Your tool' : t.availability === 'available' ? 'Borrow ↗' : 'Unavailable'}</button></div></div></article>`;
+    const far = typeof t.distance_m === 'number' && t.distance_m > 2000;
+    return `<article class="tool-card"><div class="tool-art ${esc(SVG_KEY[t.category] || 'spade')}">${toolSVG(SVG_KEY[t.category])}<span class="tool-status ${t.availability === 'available' ? '' : 'busy'}"><i></i>${esc(statusLabel)}</span></div><div class="tool-body"><h3>${esc(t.name)}</h3><span class="tool-owner">${esc(t.owner.display_name)}’s tool · ${esc(t.community.postcode)}${distance}</span><div class="tool-bottom"><span>Free to borrow</span><button data-borrow="${esc(t.id)}" ${t.availability !== 'available' || own || far ? 'disabled' : ''}>${own ? 'Your tool' : far ? 'Too far to borrow' : t.availability === 'available' ? 'Borrow ↗' : 'Unavailable'}</button></div></div></article>`;
   }).join('');
 }
 /* The line under the postcode box: plain status at home, or the browse banner
@@ -295,7 +335,24 @@ function community() {
   const shownOutcode = esc(shown ? shown.outcode : '');
   return `<section class="hero"><div class="hero-copy"><span class="location"><i></i> Small actions. Right on your doorstep.</span><h1>A little sharing.<br>A <em>greener</em><br>neighbourhood.</h1><p>The tools you need might be just next door.<br>Borrow, lend, and make your patch a little better.</p><form class="postcode-form" id="postcode-form"><span aria-hidden="true">⌖</span><input id="postcode" aria-label="Your UK postcode" value="${esc(postcode())}" maxlength="10" required><button type="submit">Check a postcode ↗</button></form><p class="field-message" id="postcode-message">${postcodeMessage()}</p></div><div class="hero-art">${gardenArt()}<span class="art-note">Good things grow together.</span><div class="art-label"><div class="mini-avatars"><span>A</span><span>B</span><span>♡</span></span><span>Less buying. More belonging.</span></div></div></section>
 <section><div class="section-heading"><div><h2>A small look at your local patch</h2><p>Environmental context for ${esc(postcode())} — reported per provider by the API.</p></div><span class="eyebrow">${state.browse ? `BROWSING ${esc(state.browse.outcode)}` : 'YOUR POSTCODE, TOGETHER'}</span></div><div class="environment">${envCard('≋','The air around you','air_quality','Open-Meteo')}${envCard('ϟ','Your regional electricity','carbon_intensity','NESO Carbon Intensity')}<div class="env-card"><span class="env-icon">♧</span><div><h3>Room to grow</h3><strong>${esc(greenspaceLabel())}</strong><p>Green spaces near ${shownOutcode}</p></div></div></div>${contextScoreCard()}</section>
-<div class="workspace"><section><div class="section-heading"><div><h2>Good tools. Great neighbours.</h2><p>Something sitting in your shed could start something good.</p></div><button class="btn secondary" data-publish>＋ Lend a tool</button></div><div class="filterbar"><div class="filters">${[['all','All tools'],['garden','Gardening'],['cleanup','Clean-up'],['available','Available']].map(([v,l])=>`<button class="chip ${ui.filter===v?'active':''}" data-filter="${v}">${l}</button>`).join('')}</div><input class="search-input" id="tool-search" value="${esc(ui.search)}" placeholder="Search tools…" aria-label="Search tools"></div><div class="tool-grid" id="tool-grid">${toolCards()}</div></section><aside><div class="action-card"><span class="eyebrow">LET’S DO SOME GOOD</span><span class="flower">✳</span><h2>A greener street<br>starts with us.</h2><p>Pick a small action. Find the tools.<br>Make a difference, together.</p><a class="btn primary" href="#task">Start a community action <span>↗</span></a></div><div class="map-card"><h3>⌖ Green spaces nearby</h3>${slot('map', greenSpacePanel())}</div></aside></div><div class="bottom-banner"><span>✳</span><div><strong>The more we share, the more we can do.</strong><p>${banner ? `${banner.active_tools_count} tools shared · ${banner.returned_loans_count} returned loans · ${banner.completed_tasks_count} completed actions in ${esc(me.community.outcode)}.` : 'A missing litter picker today. A whole community clean-up tomorrow.'}</p></div><button class="text-button" data-publish>Be someone’s helpful neighbour ↗</button></div>`;
+<div class="workspace"><section><div class="section-heading"><div><h2>Good tools. Great neighbours.</h2><p>Something sitting in your shed could start something good.</p></div><button class="btn secondary" data-publish>＋ Lend a tool</button></div><div class="filterbar"><div class="filters">${[['all','All tools'],['garden','Gardening'],['cleanup','Clean-up'],['available','Available']].map(([v,l])=>`<button class="chip ${ui.filter===v?'active':''}" data-filter="${v}">${l}</button>`).join('')}</div><input class="search-input" id="tool-search" value="${esc(ui.search)}" placeholder="Search tools…" aria-label="Search tools"></div><div class="tool-grid" id="tool-grid">${toolCards()}</div></section><aside><div class="action-card"><span class="eyebrow">LET’S DO SOME GOOD</span><span class="flower">✳</span><h2>A greener street<br>starts with us.</h2><p>Pick a small action. Find the tools.<br>Make a difference, together.</p><a class="btn primary" href="#task">Start a community action <span>↗</span></a></div><div class="map-card" id="project-map">${projectMapCard()}</div></aside></div><div class="bottom-banner"><span>✳</span><div><strong>The more we share, the more we can do.</strong><p>${banner ? `${banner.active_tools_count} tools shared · ${banner.returned_loans_count} returned loans · ${banner.completed_tasks_count} completed actions in ${esc(me.community.outcode)}.` : 'A missing litter picker today. A whole community clean-up tomorrow.'}</p></div><button class="text-button" data-publish>Be someone’s helpful neighbour ↗</button></div>`;
+}
+/* ToolResponse locates a tool at its community's postcode centre. The origin
+   stays the signed-in user's home even when the visible postcode changes. */
+function projectMapCard() {
+  const you = homeCommunity();
+  const tools = listedTools()
+    .filter(t => t.availability === 'available' && t.owner.id !== state.me.id)
+    .map(t => ({ ...t, latitude: t.community.latitude, longitude: t.community.longitude }));
+  const green = provider(visibleEnvironment(), 'greenspace');
+  const greenspaces = isFreshProvider(green) && Array.isArray(green.data) ? green.data.slice(0, 5) : [];
+  const plan = M.planNearestRoute(you, tools);
+  const map = M.renderMapSVG({ you, tools, greenspaces, path: plan.path, nearest: plan.nearest });
+  const description = plan.message === 'no_tools'
+    ? 'No borrowable tools nearby yet. Lend one and the route appears.'
+    : M.describeNearest(plan);
+  const native = `<div class="route-map">${map}</div><p class="route-summary" role="status">${esc(description)}</p><section class="map-green-section" aria-label="Green spaces nearby"><h4>Green spaces nearby</h4>${greenSpacePanel()}</section>`;
+  return `<h3>⌖ Your next little project</h3>${slot('map', native)}`;
 }
 function greenspaceLabel() {
   const p = provider(visibleEnvironment(), 'greenspace');
@@ -324,18 +381,17 @@ function providerGap(p, source, emptyReason) {
   return isFreshProvider(p) ? `${source} ${emptyReason}` : `still waiting on ${source}`;
 }
 
-/** The map card body when no embed URL is configured: C's real green spaces,
- *  nearest first, with straight-line distance (C returns distance_km, not a
- *  walking route) and an honest degraded state that tells an empty answer
- *  apart from a source still pending. */
+/** The green-space section below the route: C's real places, nearest first,
+ *  with straight-line distance and an honest degraded state that tells an
+ *  empty answer apart from a source still pending. */
 function greenSpacePanel() {
-  const p = provider(state.environment, 'greenspace');
+  const p = provider(visibleEnvironment(), 'greenspace');
   const places = isFreshProvider(p) && Array.isArray(p.data)
     ? p.data.filter(pl => pl && typeof pl.name === 'string') : [];
   if (!places.length) {
     const source = (p && (p.source || p.attribution)) || 'OpenStreetMap Overpass API';
     const detail = providerGap(p, source, 'answered with no named green spaces');
-    return `<div class="map-placeholder"><span class="map-symbol">⌑</span><b>Green spaces near ${esc(state.me.community.outcode)}</b><small>${esc(detail)}.</small></div>`;
+    return `<div class="map-placeholder"><span class="map-symbol">⌑</span><b>Green spaces near ${esc(currentCommunity().outcode)}</b><small>${esc(detail)}.</small></div>`;
   }
   const nearestFirst = places.slice().sort((a, b) => (finiteNumber(a.distance_km) ?? Infinity) - (finiteNumber(b.distance_km) ?? Infinity));
   const rows = nearestFirst.map(pl => {
@@ -445,6 +501,39 @@ function contextScoreCard() {
 }
 
 /* ------------------------------------------------------------------ task page */
+function defaultTaskPlace() {
+  const c = homeCommunity();
+  return { name: `Community centre · ${c.outcode}`, latitude: c.latitude, longitude: c.longitude, source: 'fixture', source_id: null };
+}
+function taskPlaceOptions() {
+  const green = provider(visibleEnvironment(), 'greenspace');
+  const places = isFreshProvider(green) && Array.isArray(green.data)
+    ? green.data.filter(p => p && typeof p.name === 'string' && p.name.trim() && p.id !== null && p.id !== undefined) : [];
+  return places.map(p => {
+    const latitude = finiteNumber(p.latitude), longitude = finiteNumber(p.longitude);
+    const valid = latitude !== null && longitude !== null && Math.abs(latitude) <= 90 && Math.abs(longitude) <= 180;
+    // Provider distance_km describes its visible postcode, not necessarily the
+    // account's home. The backend always creates actions in the home community.
+    const metres = valid ? M.haversineMeters(homeCommunity(), { latitude, longitude }) : Infinity;
+    const reason = !valid ? 'coordinates unavailable' : metres > 2000 ? 'outside the 2 km action area' : '';
+    return { id: String(p.id), type: p.type || 'Green space', distance: finiteNumber(p.distance_km), disabled: !!reason, reason,
+      place: { name: p.name, latitude, longitude, source: 'osm', source_id: String(p.id) } };
+  });
+}
+function selectedTaskPlace(options = taskPlaceOptions()) {
+  const contextId = currentCommunity().id;
+  const selected = ui.selectedPlaceCommunityId === contextId
+    ? options.find(p => p.id === ui.selectedPlaceId && !p.disabled) : null;
+  if (!selected) { ui.selectedPlaceId = null; ui.selectedPlaceCommunityId = contextId; }
+  return selected ? selected.place : defaultTaskPlace();
+}
+function taskPlacePanel(task) {
+  if (task) return `<label>Where are we helping?<input id="place-name" value="${esc(task.place.name)}" maxlength="120" readonly></label><p class="notice">Meeting point saved with the action by the backend (within 2 km of ${esc(homePostcode())}).</p>`;
+  const options = taskPlaceOptions();
+  const selected = selectedTaskPlace(options);
+  const rows = options.map(p => `<label class="place-option"><input type="radio" name="task-place" data-task-place="${esc(p.id)}" value="${esc(p.id)}" ${selected.source === 'osm' && selected.source_id === p.id ? 'checked' : ''} ${p.disabled ? 'disabled' : ''}><span><b>${esc(p.place.name)}</b><small>${esc(p.type)} · ${p.distance === null ? 'distance pending' : `${p.distance.toFixed(2)} km · straight-line distance`}${p.reason ? ` · ${esc(p.reason)}` : ''}</small></span></label>`).join('');
+  return `<fieldset class="place-panel" id="task-place-panel"><legend>Where are we helping?</legend><label class="place-option"><input type="radio" name="task-place" data-task-place="" value="" ${selected.source === 'fixture' ? 'checked' : ''}><span><b>${esc(defaultTaskPlace().name)}</b><small>Community centre · default meeting point</small></span></label>${rows}${options.length ? '' : '<small class="muted">Green spaces appear when the environment card has data</small>'}</fieldset><p class="notice">Choose a meeting point, then pick an action. Nothing is saved until you pick an action. Actions stay within 2 km of ${esc(homePostcode())}.</p>`;
+}
 const LOCKED_STATES = ['pending', 'confirmed', 'in_use', 'fulfilled'];
 function requirementRow(row, task) {
   const own = row.loans.slice().sort((a, b) => b.stageOrder - a.stageOrder)[0];
@@ -501,10 +590,8 @@ function taskPage() {
     : storyTask.status === 'completed'
       ? `<p class="muted">Recorded ${esc(String(storyTask.completed_at || '').slice(0, 16).replace('T', ' '))} UTC.</p><label>Your outcome<textarea id="outcome-note" readonly>${esc(recorded ? recorded.note : '')}</textarea></label><div class="impact-fields"><label>Bags collected<input id="impact-bags" type="number" value="${recorded && recorded.bags_collected !== null ? recorded.bags_collected : ''}" readonly></label><label>Volunteer minutes<input id="impact-minutes" type="number" value="${recorded && recorded.volunteer_minutes !== null ? recorded.volunteer_minutes : ''}" readonly></label></div><p class="notice">Self-reported by the organiser. Returns are counted separately from this report.</p>`
       : `<p class="muted">Finished your action? Record what you did. A returned tool does not complete an action.</p><label>Your outcome<textarea id="outcome-note" maxlength="500" placeholder="What did you do for your neighbourhood?"></textarea></label><div class="impact-fields"><label>Bags collected<input id="impact-bags" type="number" min="0" step="1" value=""></label><label>Volunteer minutes<input id="impact-minutes" type="number" min="0" step="5" value=""></label></div>${readiness && readiness.warning ? `<p class="notice">${esc(readiness.warning)}</p>` : ''}<button class="btn primary" id="complete-task" ${readiness && !readiness.canSubmit ? 'disabled' : ''}>Record completed action ↗</button><p class="muted">Completion is self-reported by the organiser.</p>`;
-  const place = task
-    ? `<label>Where are we helping?<input id="place-name" value="${esc(task.place.name)}" maxlength="120" readonly></label><p class="notice">Meeting point saved with the action by the backend (within 2 km of ${esc(homePostcode())}).</p>`
-    : `<p class="notice">Nothing is saved until you pick an action. The meeting point is fixed to your community when the action is created.</p>`;
-  return `<div class="page-heading"><span class="eyebrow">SMALL ACTIONS, SHARED POSSIBILITIES</span><h1>Let's make something <em>good.</em></h1><p>Choose an action and bring the right tools together.</p></div><div class="task-layout"><div><section class="panel"><h2>01 / Pick your little project</h2><div class="template-options">${templateButtons}</div>${place}</section><section class="panel"><h2>02 / Bring the tools together</h2>${slot('tasks', checklist)}</section></div><aside><section class="panel"><span class="eyebrow">EVERY STEP COUNTS</span><h2 style="margin-top:15px">03 / Tell the story</h2>${story}</section><section class="panel"><h2>Little actions, adding up.</h2>${slot('outcomes', impactPanel(report))}</section></aside></div>`;
+  const place = taskPlacePanel(task);
+  return `<div class="page-heading"><span class="eyebrow">SMALL ACTIONS, SHARED POSSIBILITIES</span><h1>Let's make something <em>good.</em></h1><p>Choose an action and bring the right tools together.</p></div><div class="task-layout"><div><section class="panel"><h2>01 / Pick your little project</h2>${place}<div class="template-options">${templateButtons}</div></section><section class="panel"><h2>02 / Bring the tools together</h2>${slot('tasks', checklist)}</section></div><aside><section class="panel"><span class="eyebrow">EVERY STEP COUNTS</span><h2 style="margin-top:15px">03 / Tell the story</h2>${story}</section><section class="panel"><h2>Little actions, adding up.</h2>${slot('outcomes', impactPanel(report))}</section></aside></div>`;
 }
 
 /* ------------------------------------------------------------------ loans page */
@@ -638,22 +725,31 @@ async function chooseTemplate(templateId, btn) {
   }
   await action(btn, async () => {
     const tpl = state.templates.find(t => t.id === templateId);
-    const c = state.me.community;
+    const open = myOpenTask();
     const created = await client.createTask({
       template_id: templateId,
       title: tpl ? tpl.title : templateId,
-      place: { name: `Neighbourhood green space · ${c.outcode}`, latitude: c.latitude, longitude: c.longitude, source: 'manual', source_id: null }
+      // Template switches retain the read-only meeting point of the open action.
+      place: open ? open.place : selectedTaskPlace()
     });
     ui.selectedTaskId = created.id;
+    ui.selectedPlaceId = null;
     await refresh();
     render();
     toast('Action started. Now bring the tools together.');
-  });
+  }, { verbatim422: true, onError: err => {
+    if (err && err.status === 422) {
+      ui.selectedPlaceId = null;
+      render();
+    }
+  } });
 }
 async function borrow(toolId, requirementId, btn) {
   const tool = visibleTools().find(t => t.id === toolId) || state.tools.find(t => t.id === toolId);
   if (!tool || tool.availability !== 'available') { toast('This tool is no longer available to request.'); render(); return; }
   if (state.me && tool.owner.id === state.me.id) { toast('That is your own tool — a neighbour has to borrow it.'); return; }
+  const tooFar = typeof tool.distance_m === 'number' && tool.distance_m > 2000;
+  if (tooFar) { toast('That tool is in another neighbourhood. Borrowing works within 2 km — browsing is fine.'); return; }
   await action(btn, async () => {
     const fields = { tool_id: toolId };
     if (requirementId) fields.requirement_id = String(requirementId).split('#')[0];
@@ -742,9 +838,20 @@ document.addEventListener('input', e => {
     ui.search = e.target.value;
     const grid = $('#tool-grid');
     if (grid) grid.innerHTML = toolCards();
+    const map = $('#project-map');
+    if (map) map.innerHTML = projectMapCard();
   }
 });
 document.addEventListener('change', e => {
+  if (e.target.dataset && Object.prototype.hasOwnProperty.call(e.target.dataset, 'taskPlace')) {
+    if (ui.busy || myOpenTask() || !e.target.checked) return;
+    const id = e.target.dataset.taskPlace;
+    const option = taskPlaceOptions().find(p => p.id === id && !p.disabled);
+    ui.selectedPlaceId = option ? option.id : null;
+    ui.selectedPlaceCommunityId = currentCommunity().id;
+    render();
+    return;
+  }
   if (e.target.dataset && e.target.dataset.self) selfSupply(e.target.dataset.self, e.target.checked, e.target);
 });
 document.addEventListener('submit', e => {

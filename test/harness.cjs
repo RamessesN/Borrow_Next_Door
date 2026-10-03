@@ -1,6 +1,6 @@
 /* DOM + API harness for A's UI wiring.
  *
- * Loads web/task-module.js, web/api.js and web/app.js in a vm context that
+ * Loads web/task-module.js, web/map-module.js, web/api.js and web/app.js in a vm context that
  * looks like a browser: a minimal DOM, localStorage, and a **mock backend**
  * standing in for member B's FastAPI server (test/harness.cjs only — no
  * network, no real server, nothing outside this file).
@@ -630,6 +630,10 @@ function createApp(options) {
   vm.runInContext(fs.readFileSync(path.join(ROOT, 'web/task-module.js'), 'utf8'), context);
   if (!context.BND_TASK) throw new Error('web/task-module.js did not publish BND_TASK');
   context.window.BND_TASK = context.BND_TASK;
+
+  vm.runInContext(fs.readFileSync(path.join(ROOT, 'web/map-module.js'), 'utf8'), context);
+  if (!context.BND_MAP) throw new Error('web/map-module.js did not publish BND_MAP');
+  context.window.BND_MAP = context.BND_MAP;
 
   vm.runInContext(fs.readFileSync(path.join(ROOT, 'web/api.js'), 'utf8'), context);
   if (!context.BND_API) throw new Error('web/api.js did not publish BND_API');

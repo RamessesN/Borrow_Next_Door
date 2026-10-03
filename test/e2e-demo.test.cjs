@@ -63,6 +63,7 @@ test('bob lends, alice borrows: the full story through the real API client', asy
   assert.equal(app.run("state.tools[0].category"), 'litter_picker', 'the frozen B slug round-trips');
   assert.equal(app.run("state.tools[0].availability"), 'available');
   assert.match(app.html(), /Ready to share/);
+  assert.match(app.html(), /No borrowable tools nearby yet/, 'Bob’s own tool is not a route candidate');
 
   /* ---- 4. sign out, alice signs in ---- */
   await signOut(app);
@@ -71,6 +72,9 @@ test('bob lends, alice borrows: the full story through the real API client', asy
   await signIn(app, 'alice');
   assert.equal(app.run('state.me.display_name'), 'Alice');
   assert.equal(app.run('state.tools.length'), 1, 'Alice sees Bob\'s tool');
+  assert.match(app.html(), /class="tool-pin nearest"/, 'API ToolResponse community coordinates become a map pin');
+  assert.match(app.html(), /Closest: My long-handled litter picker — about \d+ m \(estimated route\)/);
+  assert.match(app.html(), /<polyline class="route"/, 'the route is rendered even when postcode centres coincide');
 
   /* ---- 5. alice creates the action ---- */
   app.run("location.hash='#task';render()");

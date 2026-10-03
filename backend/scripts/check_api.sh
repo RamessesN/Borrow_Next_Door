@@ -3,10 +3,10 @@
 # Verifies health endpoints and a demo login against a running server.
 #
 # Usage (from backend/):
-#   DEMO_ACCESS_CODE=<team-code> ./scripts/check_api.sh
+#   ./scripts/check_api.sh
 #
+# Demo login needs only USER_ALIAS; no access code is required.
 # Environment:
-#   DEMO_ACCESS_CODE  required, >=16 chars (team runtime config, never committed)
 #   BASE_URL          optional, default http://127.0.0.1:8000
 #   USER_ALIAS        optional, default alice
 set -euo pipefail
@@ -15,15 +15,6 @@ cd "$(dirname "$0")/.."
 
 BASE_URL="${BASE_URL:-http://127.0.0.1:8000}"
 USER_ALIAS="${USER_ALIAS:-alice}"
-
-if [[ -z "${DEMO_ACCESS_CODE:-}" ]]; then
-  echo "ERROR: DEMO_ACCESS_CODE must be set (>=16 chars, see .env.example)." >&2
-  exit 1
-fi
-if [[ "${#DEMO_ACCESS_CODE}" -lt 16 ]]; then
-  echo "ERROR: DEMO_ACCESS_CODE must be at least 16 characters long." >&2
-  exit 1
-fi
 
 PY=".venv/bin/python"
 if [[ ! -x "$PY" ]]; then
@@ -57,9 +48,9 @@ echo "base_url: $BASE_URL"
 check "health/live"  "$BASE_URL/health/live"
 check "health/ready" "$BASE_URL/health/ready"
 
-login_body="$("$PY" - "$USER_ALIAS" "$DEMO_ACCESS_CODE" <<'PYEOF'
+login_body="$("$PY" - "$USER_ALIAS" <<'PYEOF'
 import json, sys
-print(json.dumps({"user_alias": sys.argv[1], "access_code": sys.argv[2]}))
+print(json.dumps({"user_alias": sys.argv[1]}))
 PYEOF
 )"
 

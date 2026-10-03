@@ -1,122 +1,140 @@
 # Borrow Next Door · 集成运行指南
 
-以邮编为中心的邻里工具共享应用。本仓库包含前端（`web/`）、B 后端（`backend/`，FastAPI + SQLite）、对接文档（`docs/handoff/`）与测试（`test/`、`backend/tests/`）。
+## 项目简介
 
-## 目录结构
+以邮编为中心的邻里工具共享应用：借一件邻居的工具，组织一次公园清洁或花坛养护，再记录归还与行动成果。本仓库包含前端（`web/`）、后端（`backend/`，FastAPI + SQLite）、对接文档与测试。工具、任务、借还记录由后端保存，不靠浏览器假数据替代多人协作。
 
-```text
-├── backend/            # B 后端（已交付）：FastAPI + SQLite，端口 8000
-│   ├── app/            # 路由、服务、适配器（C 的外部数据适配器在此层）
-│   ├── scripts/        # dev_server.sh / reset_db.py / check_api.sh
-│   ├── tests/          # pytest 契约测试（156 项）
-│   ├── docs/           # API_SAMPLES.md（curl 全表）/ TEST_REPORT.md / DECISIONS.md
-│   └── var/            # sqlite 文件（运行时创建）
-├── web/                # A 前端：app.js / task-module.js（D）/ integrations.js
-├── docs/handoff/       # 对接说明：B 已交付契约、旧模型映射表、C 位置数据、A 界面边界
-├── test/               # 前端测试：纯函数 / 端到端 / 文档契约 / 冒烟
-├── server.cjs          # 前端静态服务器（npm start，端口 5173）
-└── package.json
-```
+这是本地比赛演示，不是真实居民注册服务。**登录无需任何访问码**，演示身份只需选择账号；没有密码，也不代表已验证居民身份。后端演示登录限流为每 IP 每分钟 60 次请求，未实现真实认证前 `APP_MODE=production` 拒绝启动。
 
-## 一键启动（推荐，前后端一起）
+## 怎么用（从零开始）
 
-从全新 clone 到可演示只需一条命令（需要 Python 3.11+ 与 Node.js）：
+### 1. 打开终端，运行 `./start.sh`
+
+先安装 Python 3.11+ 和 Node.js，再在终端进入下载好的项目文件夹（能看到本文件与 `start.sh`）：
 
 ```bash
+cd /你的路径/GREENER_BY_POSTCODE
 ./start.sh
 ```
 
-脚本会自动：创建 `backend/.venv` 并安装依赖 → 首次运行时初始化演示数据库 → 生成**本次运行**的演示访问码（也可用 `DEMO_ACCESS_CODE=<团队码> ./start.sh` 指定）→ 同时拉起后端 :8000 与前端 :5173 → 打开浏览器并打印访问码。`Ctrl+C` 会一并停止前后端。
+脚本会创建 `backend/.venv`、安装后端依赖、首次初始化演示数据库，并同时启动后端 :8000 与前端 :5173。**无需生成、填写或传递任何访问码**。保留这个终端窗口；演示结束后按 `Ctrl+C`，两个服务会一起停止。
+
+Windows 用户可在 WSL / Git-Bash 中运行，或参考下方手动启动命令。
+
+### 2. 在浏览器打开页面
+
+脚本会尝试自动打开浏览器。若没有打开，手动访问 http://localhost:5173 。后端接口文档在 http://127.0.0.1:8000/docs 。打不开时先看终端是否报错，确保服务仍在运行。
+
+### 3. 选择 Alice / Bob / Carol 登录
+
+在登录面板选择一个 **demo account**，点击登录即可，不需要访问码。三位用户的 home 社区都是 `EH8 9AB`。全新种子里这里有 3 件工具：Alice 的浇水壶、手铲，以及 Bob 的可重复使用手套。
+
+第二个有工具的演示街区是 `EH14 4AS`，由 Dora / Eve 持有 4 件工具：长柄垃圾夹、备用手套、铜浇水壶、宽手铲。Dora / Eve 不在前端登录选择器中，用邮编浏览即可看到他们的工具。
+
+### 4. 三个页签分别做什么
+
+- **社区首页（The neighbourhood，`#community`）**：看邮编环境卡、`Postcode green context score`、工具列表；筛选/搜索工具，点击 `Lend a tool` 发布工具，或申请借用。
+- **社区行动（Make a difference，`#task`）**：选择 `Park cleanup` 或 `Flowerbed care` 模板，为每类需求借工具或勾选自带，查看进度；实际开展行动后填写成果说明、垃圾袋数与志愿分钟数。
+- **借入借出（My borrowing，`#loans`）**：`I’m borrowing` 查看自己借入的工具，`I’m lending` 查看借出的工具；出借方依次确认接受、交接和归还。发送申请、接受预约、交接与归还是不同状态。
+
+### 5. 输入邮编，切换浏览另一个街区
+
+在首页邮编输入框中输入 `EH14 4AS`，点击 `Check a postcode`。首页会切换为该社区的环境卡和工具列表，你应看到 Dora / Eve 的 4 件工具，而不是 EH8 的工具。
+
+页面会提示正在浏览别的邮编。点击 **`Back to my street`**，即可返回自己的 `EH8 9AB`。也可以重新输入 home 邮编返回。
+
+**浏览不等于搬家**：登录身份、借还记录、任务和发布工具仍属于 home 社区；发布对话框会明确说明工具在哪个 home 社区出借。跨街区看得到工具，不保证能借，后端仍按距离与权限校验。
+
+若旧数据库没有新街区工具，先用 `./start.sh --reset` 重建（会清空已有业务记录）。
+
+### 6. 双窗口 Alice / Bob 演示故事（7 步）
+
+请用**两个独立浏览器会话**：例如普通窗口登录 Alice，无痕窗口登录 Bob，或两个浏览器/浏览器配置。不要只开同一浏览器的两个普通窗口，因为它们共享登录存储。双方操作后，另一窗口可刷新页面查看新状态（当前不是实时推送）。
+
+1. **分别登录**：窗口 A 选择 Alice，窗口 B 选择 Bob；两人都先回到自己的 `EH8 9AB` 首页。
+2. **Bob 发布工具**：在 B 的社区首页点击 `Lend a tool`，填写名称（如 “Bob’s demo litter picker”）、选择 `Litter picker` 类别并填写描述，再点击 `Make it available`。
+3. **Alice 建行动**：刷新 A，进入行动页，选择 `Park cleanup`。模板生成垃圾夹与手套两类需求；手套勾选自带（`self supplied`），这样只需演示借一件工具。
+4. **Alice 申请借用**：在垃圾夹需求行选择刚发布的 Bob 工具，点击 `Request from Bob`。它变为待接受申请，工具被预留，不代表已交接。
+5. **Bob 接受并交接**：刷新 B，进入借入借出页的 `I’m lending`，找到申请，点击 `Accept request`，再确认交接。状态依次为 `accepted`、`on_loan`；刷新 A 可查看行动需求进度。
+6. **开展行动并归还**：假定两人已实际完成清洁，Alice 将工具交回；Bob 在 B 中确认归还。工具重新可借，借还记录为 `returned`，Alice 对应需求为 `fulfilled`。
+7. **Alice 记录成果**：刷新 A，回行动页，填写成果说明、袋数和志愿分钟数并提交。查看行动完成、归还次数等指标；成果是 **self-reported**，不是外部核验，也不会当成区域环境改善的证明。
+
+### 7. 地图卡片与最近可借工具路线
+
+地图模块 `web/map-module.js` 为最近可借工具提供路线规划：用网格图构建候选路径，以 A* 计算每件候选工具的路径并按成本选最近者；模块同时提供 Dijkstra，单测用它核对 A* 的最短路径成本。地图卡片可显示候选工具、最近工具高亮、路径与估算距离；无工具或无有效坐标时显示空/降级状态，不虚构路线。
+
+这是**邮编中心点与合成网格的算法演示**，不是真实道路、步行导航或实时 GPS；网格路径长度与直线距离是两种指标。可借状态、是否本人所有与借用权限仍以工具列表和后端校验为准。绿地列表则来自环境数据，按距邮编中心的直线距离排序，与借工具路线不是同一数据。
+
+### 8. 常用命令
+
+以下命令从项目根目录执行：
 
 ```bash
-./start.sh --reset    # 重建演示数据库后启动
-./start.sh --help     # 选项说明
-BACKEND_PORT=8100 FRONTEND_PORT=5200 ./start.sh   # 换端口
+./start.sh              # 保留现有数据库启动，无访问码
+./start.sh --reset      # 删除并重建演示数据，然后启动；会清空任务/借还记录
+./start.sh --help       # 启动选项
+(cd backend && .venv/bin/pytest -q)  # 后端测试
+npm test               # 前端单测 + 尝试真实后端 smoke
+npm run check          # 前端语法检查
 ```
 
-Windows 用户请在 WSL / Git-Bash 中运行本脚本，或按下文分别手动启动。
+2026-10-03 本轮最终实测：后端 **203 passed**，前端 Node 测试 **69 passed**（含地图接线新增测试）。指定临时真实后端的 smoke 已通过。`npm test` 在默认 :8000 无服务时会明确 **SKIP**，这不算通过；详见 `backend/docs/TEST_REPORT.md`。
 
-## 启动后端（端口 8000，手动方式）
+手动启动（先按 `backend/README.md` 安装依赖）：
 
 ```bash
-cd backend
-python3.13 -m venv .venv
-.venv/bin/pip install -r requirements.txt
+(cd backend && .venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 1)
+# 另一个终端，在根目录
+npm start
 ```
 
-后端需要环境变量 `DEMO_ACCESS_CODE`（团队运行时配置的演示访问码，≥16 字符；空值、占位值或短于 16 字符会拒绝启动）。两种启动方式：
+已有数据库才可直接启动；需重建时用 `(cd backend && .venv/bin/python scripts/reset_db.py)`。`backend/scripts/dev_server.sh` 每次都会重建数据库，不能用它保留演示进度。
 
-```bash
-# 方式一：一键脚本（校验环境变量 → 重置数据库 → 启动 uvicorn :8000）
-DEMO_ACCESS_CODE=<团队访问码> ./scripts/dev_server.sh
+开发端口可用 `BACKEND_PORT=8100 FRONTEND_PORT=5200 ./start.sh` 改写；前端跨域来源/接口地址是否适配新端口需另行确认，默认 8000/5173 最稳妥。
 
-# 方式二：直接启动 uvicorn（数据库已存在时）
-DEMO_ACCESS_CODE=<团队访问码> .venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 1
+## 数据来源与诚实标注
+
+- 邮编与中心坐标：[postcodes.io](https://postcodes.io/)。种子坐标是 fixture，不等于用户精确住址。
+- 区域电力与能源结构：[NESO Carbon Intensity API](https://carbonintensity.org.uk/)。区域数据不是该社区行动减少的碳排放。
+- 空气质量：[Open-Meteo Air Quality API](https://open-meteo.com/en/docs/air-quality-api)，为模型估算，不是现场传感器测量。
+- 附近绿地：Overpass API / [OpenStreetMap](https://www.openstreetmap.org/)，© OpenStreetMap contributors；结果最多 5 个，距离为中心点直线估计，不是完整绿地覆盖率。
+- 环境响应区分 live / cache / stale / fixture。外部服务不可用时可用离线演示快照（含 `EH8 9AB`、`EH14 4AS`），页面明确标注 demo snapshot；无数据则显示 pending/unavailable，不填零冒充实测。
+- `Postcode green context score` 是公开区域数据的上下文估算；缺少所需 provider 时不显示总分，不与借还/行动成果指标混在一起。
+
+## 完成范围与已知限制
+
+**已完成**：无访问码演示登录、工具发布/浏览、后端借还状态机、任务模板与逐类需求、成果自报、社区环境适配与缓存/降级、绿地列表与区域评分卡、home/browse 邮编分离、两个有工具的演示街区、地图算法模块。模板切换复用已存在的开放任务并保留进度，不重复创建同模板任务。
+
+**未做 / 暂缓**：
+
+- 照片上传与成果照片存储。
+- 同一类别多个工具槽位 / 多数量需求（目前模板每类 1 个需求，`quantity=1`）。
+- `would_have_bought_new` 问卷与“避免购买新品”成果指标。
+- 真实注册/居民验证、production 认证、真实道路导航、实时多人状态推送、负载与长时间稳定性验证。
+
+外部网络会影响环境数据；借还业务不依赖外部环境 API 成功。地图 UI 接线由并行整合完成，本轮验证了模块单测与 mock DOM 地图接线测试，未进行真实浏览器地图操作验收。另保留 `EH16 5AA` 无工具 fixture 做距离边界测试，因此种子数据库共有 3 个社区，但面向演示的有工具街区是上述 2 个。
+
+## 目录与对接文档
+
+```text
+backend/       # FastAPI + SQLite、脚本、pytest、后端文档
+web/           # app.js / api.js / task-module.js / map-module.js / integrations.js
+test/          # Node 单测、mock DOM/API 流程、文档契约
+services/      # 队友原环境服务，后端适配器已整合其逻辑
+docs/handoff/  # 团队接口与边界说明
+server.cjs     # npm start，前端静态服务器
+start.sh       # 一条命令启动前后端
 ```
-
-启动后：Swagger UI http://127.0.0.1:8000/docs ，OpenAPI JSON http://127.0.0.1:8000/openapi.json 。
-
-重置演示数据库（删除并重建，迁移 + 种子，可重复运行）：
-
-```bash
-.venv/bin/python scripts/reset_db.py
-```
-
-## 演示账号（demo account）
-
-种子数据包含三个演示身份：`alice`、`bob`、`carol`（均属于社区 `EH8 9AB`）。**这些是 demo account，不是真实注册**：不存密码，不代表已验证居民身份。任何界面与文档都应标注 "demo account"。
-
-登录方式：
-
-```bash
-curl -s -X POST "http://127.0.0.1:8000/api/v1/demo/sessions" \
-  -H "Content-Type: application/json" \
-  -d '{"user_alias": "alice", "access_code": "<DEMO_ACCESS_CODE>"}'
-# 成功返回 data.access_token，之后所有请求带 Authorization: Bearer <access_token>
-```
-
-## 启动前端（端口 5173）
-
-在仓库根目录：
-
-```bash
-npm start          # node server.cjs，访问 http://localhost:5173
-```
-
-需要 Node.js，无需安装 npm 依赖。也可直接打开 `web/index.html`；推荐本地服务器，便于同源标签页演示。
-
-## 两窗口演示路径
-
-B 契约的核心是多人协作，**必须在两个浏览器窗口（或两台设备）中验证**，同一窗口的假数据证明不了多人流程：
-
-1. 窗口 A 以 `alice` 登录，窗口 B 以 `bob` 登录（各自 `POST /api/v1/demo/sessions` 取 token）。
-2. 一方在社区页发布工具（`POST /api/v1/tools`，类别限 `litter_picker` / `reusable_gloves` / `watering_can` / `hand_trowel`）。
-3. 另一方创建任务（`POST /api/v1/tasks`，模板限 `park_cleanup` / `flowerbed_care`），对需求申请借用（`POST /api/v1/loans`，带 `requirement_id`）。
-4. 工具所有者在借入借出页依次接受（`/loans/{id}/accept`）、交接（`/loans/{id}/hand-over`）、确认归还（`/loans/{id}/return`）。
-5. 任务创建者独立提交成果（`POST /api/v1/tasks/{id}/complete`，自报 `outcome_note` / `bags_collected` / `volunteer_minutes`）。
-
-所有写请求（除登录 / 注销）带 `Idempotency-Key` 头（UUID）。完整 curl 样例与错误码表见 `backend/docs/API_SAMPLES.md`，字段与状态机细节见 `docs/handoff/B-data-layer.md`。
-
-## 测试
-
-```bash
-# 后端（在 backend/ 目录）：156 项契约测试
-backend/.venv/bin/pytest -q
-
-# 前端（在根目录）：纯函数 + 端到端演示 + 文档契约 + 冒烟
-npm test
-
-# 前端语法检查
-npm run check
-```
-
-## 对接文档
 
 | 文档 | 内容 |
 |---|---|
-| `docs/handoff/B-data-layer.md` | B 已交付契约：字段表、状态机、幂等、权限、并发错误码、端点全表 |
-| `docs/handoff/B-backend-contract.md` | 旧模型 → B 契约一页映射表 |
-| `docs/handoff/A-ui-boundary.md` | 前端界面边界与回归测试守护的钩子 |
-| `docs/handoff/C-location-data.md` | 位置数据与 B 适配器层的关系 |
-| `backend/docs/API_SAMPLES.md` | 可复制 curl 接口样例（按用户故事排序） |
-| `backend/docs/TEST_REPORT.md` | 后端测试执行记录（156 项全绿） |
+| `backend/README.md` | 后端安装、配置、接口边界与安全说明 |
+| `backend/docs/API_SAMPLES.md` | curl 接口样例（以实际 OpenAPI 为准） |
+| `backend/docs/TEST_REPORT.md` | 真实测试命令、计数、通过/跳过边界 |
+| `backend/docs/DECISIONS.md` | 技术选择及本轮整合决策 |
+| `docs/handoff/B-data-layer.md` | 字段、状态机、幂等、权限与并发契约 |
+| `docs/handoff/B-backend-contract.md` | 旧模型到 B 契约映射 |
+| `docs/handoff/A-ui-boundary.md` | 前端边界与测试钩子 |
+| `docs/handoff/C-location-data.md` | 位置数据与适配器层说明 |
+
+业务接口（除登录/注销）写请求带 `Idempotency-Key`（UUID），由前端自动发送。直接调登录 API 时只需要 `{"user_alias":"alice"}`；成功返回 Bearer token，后续业务请求用 `Authorization: Bearer <token>`。

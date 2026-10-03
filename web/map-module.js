@@ -393,6 +393,58 @@
 
   function fmt(n) { return (Math.round(n * 100) / 100).toFixed(2); }
 
+  // Display-only displacement: routing and reported distances always use the
+  // original coordinates. Three force passes loosen clusters; a nearest-free
+  // lattice fallback makes the minimum separation deterministic even when a
+  // distant postcode compresses an entire community into a few screen pixels.
+  function separatePins(pins, origin, box) {
+    var gap = 16;
+    function clamp(p) {
+      p.x = Math.max(box.left, Math.min(box.right, p.x));
+      p.y = Math.max(box.top, Math.min(box.bottom, p.y));
+    }
+    pins.forEach(clamp);
+    for (var pass = 0; pass < 3; pass++) {
+      for (var i = 0; i < pins.length; i++) {
+        for (var j = i + 1; j < pins.length; j++) {
+          var a = pins[i], b = pins[j], dx = b.x - a.x, dy = b.y - a.y;
+          var d = Math.hypot(dx, dy);
+          if (d >= gap) continue;
+          if (d < 0.001) {
+            var angle = hashAngle(String(a.tool.id) + ':' + String(b.tool.id)) * Math.PI / 180;
+            dx = Math.cos(angle); dy = Math.sin(angle); d = 1;
+          } else { dx /= d; dy /= d; }
+          var push = (gap - d) / 2 + 0.1;
+          a.x -= dx * push; a.y -= dy * push;
+          b.x += dx * push; b.y += dy * push;
+          clamp(a); clamp(b);
+        }
+      }
+    }
+    var placed = origin ? [origin] : [];
+    // Give the highlighted item first choice, with stable ID ordering after it.
+    pins.slice().sort(function (a, b) {
+      return Number(b.nearest) - Number(a.nearest) ||
+        String(a.tool.id).localeCompare(String(b.tool.id)) || a.index - b.index;
+    }).forEach(function (p) {
+      function free(x, y) {
+        return placed.every(function (q) { return Math.hypot(x - q.x, y - q.y) >= gap; });
+      }
+      if (!free(p.x, p.y)) {
+        var best = null, cost = Infinity;
+        for (var y = box.top; y <= box.bottom; y += gap) {
+          for (var x = box.left; x <= box.right; x += gap) {
+            var distance = Math.hypot(x - p.anchor.x, y - p.anchor.y);
+            if (distance < cost && free(x, y)) { best = { x: x, y: y }; cost = distance; }
+          }
+        }
+        if (best) { p.x = best.x; p.y = best.y; }
+      }
+      placed.push(p);
+    });
+    return pins;
+  }
+
   /** Pure SVG string. No DOM access — app.js decides where it goes. */
   function renderMapSVG(o) {
     o = o || {};
@@ -422,10 +474,11 @@
     if (maxLat - minLat < 1e-6) { minLat -= 0.001; maxLat += 0.001; }
     if (maxLon - minLon < 1e-6) { minLon -= 0.001; maxLon += 0.001; }
 
-    var mL = 14, mR = 14, mT = 14;
-    var legendH = 30, noteH = 16;
+    var mL = 16, mR = 16, mT = 16;
     var mapW = width - mL - mR;
-    var mapH = height - mT - legendH - noteH;
+    var mapH = height - mT - 52;
+    var colors = { you: '#284e3c', tool: '#dd885c', closest: '#c9a24a', green: '#9db88a',
+      surface: '#f7f4ed', ink: '#374b40', muted: '#667467' };
     var caption = safeCaption(o.caption || '');
 
     function px(p) {
@@ -435,107 +488,166 @@
       };
     }
 
+    var origin = you ? px(you) : null;
+    var pins = separatePins(tools.map(function (t, index) {
+      var p = px(t);
+      return { tool: t, index: index, x: p.x, y: p.y, anchor: p,
+        nearest: nearestId !== null && String(t.id) === String(nearestId) };
+    }), origin, { left: mL + 12, right: width - mR - 12, top: mT + 12, bottom: mT + mapH - 12 });
+    var closestPin = pins.find(function (p) { return p.nearest; });
+    var greenPoints = greens.map(function (g) { var p = px(g); return { green: g, x: p.x, y: p.y }; });
     var svg = [];
     svg.push('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ' + width + ' ' + height +
       '" width="' + width + '" height="' + height + '" role="img" aria-label="Neighbourhood map">');
     svg.push('<rect class="map-bg" x="0" y="0" width="' + width + '" height="' + height +
-      '" rx="8" fill="#f3f8f4"/>');
+      '" rx="14" fill="' + colors.surface + '"/>');
 
-    // --- schematic street grid (illustrative, not a real road network) ----
-    var i, x, y;
-    svg.push('<g class="street-grid" stroke="#e1ebe3" stroke-width="1" fill="none">');
-    for (i = 1; i < 6; i++) { x = mL + mapW * i / 6; svg.push('<line x1="' + fmt(x) + '" y1="' + mT + '" x2="' + fmt(x) + '" y2="' + fmt(mT + mapH) + '"/>'); }
-    for (i = 1; i < 4; i++) { y = mT + mapH * i / 4; svg.push('<line x1="' + mL + '" y1="' + fmt(y) + '" x2="' + fmt(mL + mapW) + '" y2="' + fmt(y) + '"/>'); }
-    svg.push('</g>');
-    svg.push('<g class="street-grid-fine" stroke="#e9f1ea" stroke-width="0.6" fill="none">');
-    for (i = 1; i < 12; i++) { x = mL + mapW * i / 12; svg.push('<line x1="' + fmt(x) + '" y1="' + mT + '" x2="' + fmt(x) + '" y2="' + fmt(mT + mapH) + '"/>'); }
-    for (i = 1; i < 8; i++) { y = mT + mapH * i / 8; svg.push('<line x1="' + mL + '" y1="' + fmt(y) + '" x2="' + fmt(mL + mapW) + '" y2="' + fmt(y) + '"/>'); }
+    // Rounded blocks suggest a neighbourhood without pretending to be real roads.
+    svg.push('<g class="street-grid" stroke="#e8e5db" stroke-width="0.65" fill="#f1efe6">');
+    for (var row = 0; row < 4; row++) {
+      for (var col = 0; col < 6; col++) {
+        svg.push('<rect x="' + fmt(mL + col * mapW / 6 + 3) + '" y="' + fmt(mT + row * mapH / 4 + 3) +
+          '" width="' + fmt(mapW / 6 - 6) + '" height="' + fmt(mapH / 4 - 6) + '" rx="5"/>');
+      }
+    }
     svg.push('</g>');
     svg.push('<rect class="map-frame" x="' + mL + '" y="' + mT + '" width="' + mapW +
-      '" height="' + mapH + '" fill="none" stroke="#d3e2d7" stroke-width="1" rx="4"/>');
+      '" height="' + mapH + '" fill="none" stroke="#e4e3d8" stroke-width="0.7" rx="10"/>');
 
-    if (caption) {
-      svg.push('<text class="map-caption" x="' + (mL + 6) + '" y="' + (mT + 12) +
-        '" font-size="8" fill="#4c6b5b" font-family="system-ui, sans-serif">' + esc(caption) + '</text>');
-    }
-
-    // --- green spaces -----------------------------------------------------
-    greens.forEach(function (g) {
-      var p = px(g);
-      svg.push('<circle class="greenspace" data-id="' + esc(g.id) + '" cx="' + fmt(p.x) + '" cy="' + fmt(p.y) +
-        '" r="7" fill="none" stroke="#7cc48f" stroke-width="1.6"/>');
-      if (g.name) {
-        svg.push('<text class="greenspace-label" x="' + fmt(p.x) + '" y="' + fmt(p.y + 17) +
-          '" font-size="6.5" fill="#4f9165" text-anchor="middle" font-family="system-ui, sans-serif">' +
-          esc(g.name) + '</text>');
-      }
+    // Every green space remains a mark; only the nearest three get direct labels.
+    greenPoints.forEach(function (p) {
+      svg.push('<circle class="greenspace" data-id="' + esc(p.green.id) + '" cx="' + fmt(p.x) + '" cy="' + fmt(p.y) +
+        '" r="8" fill="' + colors.green + '" fill-opacity="0.12" stroke="' + colors.green + '" stroke-width="1.5">' +
+        '<title>' + esc(safeCaption(p.green.name || 'Green space')) + '</title></circle>');
     });
 
     // --- route polyline (you -> closest tool) -----------------------------
     if (path.length >= 2) {
-      var pts = path.map(function (p) { var q = px(p); return fmt(q.x) + ',' + fmt(q.y); }).join(' ');
-      svg.push('<polyline class="route" points="' + pts + '" fill="none" stroke="#1f6b45" ' +
-        'stroke-width="2" stroke-linejoin="round" stroke-linecap="round" opacity="0.85"/>');
+      var routePoints = path.map(px);
+      // A separate display connector never changes the geographic route or cost.
+      var pts = routePoints.map(function (p) { return fmt(p.x) + ',' + fmt(p.y); }).join(' ');
+      svg.push('<polyline class="route" points="' + pts + '" fill="none" stroke="' + colors.you + '" ' +
+        'stroke-width="2" stroke-dasharray="4 4" stroke-linejoin="round" stroke-linecap="round" opacity="0.9"/>');
+      [routePoints[0], routePoints[routePoints.length - 1]].forEach(function (p) {
+        svg.push('<circle class="route-endpoint" cx="' + fmt(p.x) + '" cy="' + fmt(p.y) + '" r="2.5" fill="' + colors.you + '"/>');
+      });
     }
 
-    // --- tool pins (deterministic ring scatter so pins never fully stack) --
-    var scatter = tools.length > 1;
-    tools.forEach(function (t) {
-      var p = px(t);
-      var isNearest = nearestId !== null && String(t.id) === String(nearestId);
-      if (scatter && !isNearest) {
-        var a = hashAngle(t.id) * Math.PI / 180;
-        var rad = 5 + (Math.floor(hashAngle(t.id) * 7) % 4);
-        p = { x: p.x + Math.cos(a) * rad, y: p.y + Math.sin(a) * rad };
-      }
-      if (isNearest) {
-        svg.push('<circle class="tool-pin nearest" data-id="' + esc(t.id) + '" cx="' + fmt(p.x) + '" cy="' +
-          fmt(p.y) + '" r="7" fill="#0f3d2e" stroke="#ffffff" stroke-width="1.6"/>');
-        svg.push('<circle class="nearest-halo" data-id="' + esc(t.id) + '" cx="' + fmt(p.x) + '" cy="' +
-          fmt(p.y) + '" r="10.5" fill="none" stroke="#0f3d2e" stroke-width="1" opacity="0.35"/>');
-      } else {
-        svg.push('<circle class="tool-pin" data-id="' + esc(t.id) + '" cx="' + fmt(p.x) + '" cy="' +
-          fmt(p.y) + '" r="4" fill="#3f8f63" stroke="#ffffff" stroke-width="1"/>');
+    // Small leaders make display displacement explicit, not a new tool location.
+    pins.forEach(function (p) {
+      if (Math.hypot(p.x - p.anchor.x, p.y - p.anchor.y) > 1) {
+        svg.push('<line class="pin-leader" x1="' + fmt(p.anchor.x) + '" y1="' + fmt(p.anchor.y) +
+          '" x2="' + fmt(p.x) + '" y2="' + fmt(p.y) + '" stroke="#b8b8a7" stroke-width="0.7"/>');
       }
     });
+    pins.forEach(function (p) {
+      var id = esc(p.tool.id), title = safeCaption(p.tool.name || 'Tool');
+      if (p.nearest) {
+        svg.push('<circle class="nearest-halo" data-layer="outer" cx="' + fmt(p.x) + '" cy="' + fmt(p.y) +
+          '" r="12" fill="none" stroke="' + colors.closest + '" stroke-width="4" opacity="0.15"/>');
+        svg.push('<circle class="nearest-halo" data-layer="inner" cx="' + fmt(p.x) + '" cy="' + fmt(p.y) +
+          '" r="9" fill="none" stroke="' + colors.closest + '" stroke-width="1.5" opacity="0.65"/>');
+      }
+      svg.push('<circle class="tool-pin' + (p.nearest ? ' nearest' : '') + '" data-id="' + id +
+        '" cx="' + fmt(p.x) + '" cy="' + fmt(p.y) + '" r="' + (p.nearest ? '6' : '5') +
+        '" fill="' + (p.nearest ? colors.closest : colors.tool) + '" stroke="#ffffff" stroke-width="2" ' +
+        'tabindex="0" role="img" aria-label="' + esc((p.nearest ? 'Closest: ' : 'Borrowable: ') + title) + '">' +
+        '<title>' + esc((p.nearest ? 'Closest: ' : 'Borrowable: ') + title) + '</title></circle>');
+    });
+    if (origin) {
+      svg.push('<circle class="you-dot" cx="' + fmt(origin.x) + '" cy="' + fmt(origin.y) +
+        '" r="5.5" fill="' + colors.you + '" stroke="#ffffff" stroke-width="2"><title>You</title></circle>');
+    }
 
-    // --- you --------------------------------------------------------------
-    if (you) {
-      var yp = px(you);
-      svg.push('<circle class="you-dot" cx="' + fmt(yp.x) + '" cy="' + fmt(yp.y) +
-        '" r="5.5" fill="#0b3d2c" stroke="#ffffff" stroke-width="1.6"/>');
-      svg.push('<text class="you-label" x="' + fmt(yp.x + 9) + '" y="' + fmt(yp.y - 9) +
-        '" font-size="9" font-weight="600" fill="#0b3d2c" font-family="system-ui, sans-serif">You</text>');
+    // Label pills are measured conservatively and packed around every marker.
+    // Leaders preserve the association when a crowded cluster needs an offset.
+    var labels = [], obstacles = pins.concat(greenPoints).concat(origin ? [origin] : []);
+    if (caption) {
+      svg.push('<text class="map-caption" x="' + mL + '" y="11" font-size="8" fill="' + colors.muted +
+        '" font-family="system-ui, sans-serif">' + esc(caption.slice(0, 56)) + '</text>');
+    }
+    function label(p, value, className) {
+      value = safeCaption(value);
+      if (!value) return false;
+      if (value.length > 18) value = value.slice(0, 17) + '…';
+      var w = value.length * 5.2 + 12, h = 16, candidates = [];
+      [16, 26, 40].forEach(function (offset) {
+        candidates.push({ x: p.x + offset, y: p.y - h / 2 },
+          { x: p.x - offset - w, y: p.y - h / 2 },
+          { x: p.x - w / 2, y: p.y - offset - h },
+          { x: p.x - w / 2, y: p.y + offset });
+      });
+      function fits(b) {
+        if (b.x < mL + 3 || b.x + w > width - mR - 3 || b.y < mT + 3 || b.y + h > mT + mapH - 3) return false;
+        if (labels.some(function (a) { return b.x < a.x + a.w + 3 && b.x + w + 3 > a.x && b.y < a.y + h + 3 && b.y + h + 3 > a.y; })) return false;
+        return obstacles.every(function (q) {
+          var dx = q.x - Math.max(b.x, Math.min(b.x + w, q.x));
+          var dy = q.y - Math.max(b.y, Math.min(b.y + h, q.y));
+          return Math.hypot(dx, dy) >= (q.nearest ? 14 : 10);
+        });
+      }
+      var b = candidates.find(fits);
+      if (!b) {
+        for (var y = mT + 4; y + h <= mT + mapH - 3 && !b; y += 19) {
+          for (var x = mL + 4; x + w <= width - mR - 3 && !b; x += 12) {
+            var candidate = { x: x, y: y };
+            if (fits(candidate)) b = candidate;
+          }
+        }
+      }
+      if (!b) return false;
+      b.w = w; labels.push(b);
+      svg.push('<line class="label-leader" x1="' + fmt(p.x) + '" y1="' + fmt(p.y) + '" x2="' +
+        fmt(Math.max(b.x, Math.min(b.x + w, p.x))) + '" y2="' + fmt(b.y + h / 2) + '" stroke="#babcae" stroke-width="0.65"/>');
+      svg.push('<rect class="map-label-bg" x="' + fmt(b.x) + '" y="' + fmt(b.y) + '" width="' + fmt(w) +
+        '" height="16" rx="5" fill="' + colors.surface + '" fill-opacity="0.96"/>');
+      svg.push('<text class="' + className + '" x="' + fmt(b.x + 6) + '" y="' + fmt(b.y + 11) +
+        '" font-size="8" font-weight="' + (className === 'greenspace-label' ? '400' : '600') +
+        '" fill="' + colors.ink + '" font-family="system-ui, sans-serif">' + esc(value) + '</text>');
+      return true;
+    }
+    if (closestPin) label(closestPin, closestPin.tool.name || 'Closest', 'nearest-label');
+    if (origin) label(origin, 'You', 'you-label');
+    var visibleGreens = greenPoints.slice().sort(function (a, b) {
+      return (you ? haversineMeters(you, a.green) - haversineMeters(you, b.green) : a.y - b.y);
+    }).slice(0, 3).sort(function (a, b) { return a.y - b.y; });
+    var labeledGreens = 0;
+    visibleGreens.forEach(function (p) { if (label(p, p.green.name || 'Green space', 'greenspace-label')) labeledGreens++; });
+    if (greens.length > labeledGreens) {
+      svg.push('<text class="greenspace-more" x="' + (width - mR) + '" y="' + (height - 39) +
+        '" text-anchor="end" font-size="7" fill="' + colors.muted +
+        '" font-family="system-ui, sans-serif">+' + (greens.length - labeledGreens) + ' green spaces</text>');
     }
 
     // --- legend -----------------------------------------------------------
     var legend = [
-      { label: 'You', kind: 'you' },
-      { label: 'Tools', kind: 'tool' },
-      { label: 'Closest', kind: 'closest' },
-      { label: 'Green space', kind: 'green' }
+      { label: 'You', kind: 'you', span: 46 },
+      { label: 'Borrowable', kind: 'tool', span: 88 },
+      { label: 'Closest', kind: 'closest', span: 69 },
+      { label: 'Green space', kind: 'green', span: 85 }
     ];
-    var ly = height - legendH + 16;
-    var lx = mL;
-    svg.push('<g class="legend" font-family="system-ui, sans-serif" font-size="8" fill="#41564b">');
+    var ly = height - 22, lx = mL;
+    // Fit the complete horizontal legend when callers choose a narrower viewBox.
+    var legendScale = Math.min(1, mapW / 288);
+    svg.push('<g class="legend" transform="translate(' + mL + ' ' + ly + ') scale(' + legendScale +
+      ')" font-family="system-ui, sans-serif" font-size="8" fill="' + colors.ink + '">');
+    lx = 0;
     legend.forEach(function (item) {
-      if (item.kind === 'you') {
-        svg.push('<circle cx="' + (lx + 4) + '" cy="' + (ly - 3) + '" r="4" fill="#0b3d2c"/>');
-      } else if (item.kind === 'tool') {
-        svg.push('<circle cx="' + (lx + 4) + '" cy="' + (ly - 3) + '" r="3.4" fill="#3f8f63" stroke="#ffffff" stroke-width="0.8"/>');
-      } else if (item.kind === 'closest') {
-        svg.push('<circle cx="' + (lx + 4) + '" cy="' + (ly - 3) + '" r="4.6" fill="#0f3d2e" stroke="#ffffff" stroke-width="1.2"/>');
-      } else {
-        svg.push('<circle cx="' + (lx + 4) + '" cy="' + (ly - 3) + '" r="4" fill="none" stroke="#7cc48f" stroke-width="1.4"/>');
+      var color = colors[item.kind];
+      if (item.kind === 'closest') {
+        svg.push('<circle class="legend-halo" cx="' + (lx + 4) + '" cy="-3" r="6" fill="none" stroke="' + color + '" stroke-width="1" opacity="0.5"/>');
       }
-      svg.push('<text x="' + (lx + 12) + '" y="' + ly + '">' + esc(item.label) + '</text>');
-      lx += 12 + item.label.length * 4.4 + 12;
+      svg.push('<circle data-kind="' + item.kind + '" cx="' + (lx + 4) + '" cy="-3" r="' +
+        (item.kind === 'closest' ? '4.8' : '4') + '" fill="' + color + '"' +
+        (item.kind === 'green' ? ' fill-opacity="0.12" stroke="' + color + '" stroke-width="1.5"' : ' stroke="#ffffff" stroke-width="1"') + '/>');
+      svg.push('<text x="' + (lx + 13) + '" y="0">' + esc(item.label) + '</text>');
+      lx += item.span;
     });
     svg.push('</g>');
 
     // --- fixed disclaimer (product red line) ------------------------------
     svg.push('<text class="disclaimer" x="' + mL + '" y="' + (height - 5) +
-      '" font-size="6.8" fill="#6d8177" font-family="system-ui, sans-serif">' + esc(ROUTE_NOTE) + '</text>');
+      '" font-size="6.8" fill="' + colors.muted + '" font-family="system-ui, sans-serif">' + esc(ROUTE_NOTE) + '</text>');
     svg.push('</svg>');
     return svg.join('');
   }

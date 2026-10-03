@@ -9,10 +9,10 @@
  */
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { createApp, ACCESS_CODE } = require('./harness.cjs');
+const { createApp, createMockBackend } = require('./harness.cjs');
 
 async function signIn(app, alias) {
-  app.submit('#login-form', { user_alias: alias, access_code: ACCESS_CODE });
+  app.submit('#login-form', { user_alias: alias });
   await app.flush();
 }
 
@@ -75,8 +75,9 @@ test('the green-space list renders C’s real names, nearest first, with straigh
   assert.match(html, /Green space data © OpenStreetMap contributors/, 'the source attribution is shown');
   assert.match(html, /straight-line distance/, 'the distance is labelled honestly, not as a walk');
   assert.doesNotMatch(html, /walking/i, 'it never claims a walking route');
-  assert.ok(html.indexOf('George Square Gardens') < html.indexOf('The Meadows'), 'nearest place is listed first');
-  assert.ok(html.indexOf('The Meadows') < html.indexOf('Holyrood Park'), 'then the next nearest');
+  const greenList = html.match(/<ul class="green-list">([\s\S]*?)<\/ul>/)[1];
+  assert.ok(greenList.indexOf('George Square Gardens') < greenList.indexOf('The Meadows'), 'nearest place is listed first');
+  assert.ok(greenList.indexOf('The Meadows') < greenList.indexOf('Holyrood Park'), 'then the next nearest');
   assert.match(html, /demo fixture/, 'the fixture/cached provenance is labelled');
   assert.match(html, /2026-10-03 10:00 UTC/, 'the fetched_at snapshot is shown');
 });
@@ -85,8 +86,22 @@ test('the green-space list falls back to a pending state when the provider is un
   const app = createApp();
   await app.flush();
   await signIn(app, 'alice');
-  // The harness's environment answers not_implemented (data null) for greenspace.
-  app.run("location.hash='#community'; render();");
+  // Explicitly inject the not_implemented provider state (no data yet from C).
+  inject(app, {
+    status: 'unavailable',
+    greenspace: {
+      provider: 'greenspace', status: 'not_implemented', data: null,
+      source: 'OpenStreetMap Overpass API', fetched_at: null
+    },
+    air_quality: {
+      provider: 'air_quality', status: 'not_implemented', data: null,
+      source: 'Open-Meteo Air Quality', fetched_at: null
+    },
+    carbon_intensity: {
+      provider: 'carbon_intensity', status: 'not_implemented', data: null,
+      source: 'NESO Carbon Intensity API', fetched_at: null
+    }
+  });
 
   const html = app.html();
   assert.match(html, /still waiting on OpenStreetMap Overpass API/, 'the pending provider is worded as still waiting');
@@ -201,6 +216,107 @@ test('live-sourced data is not labelled as a fixture', async () => {
   assert.match(html, /· live · 2026-10-03 10:00 UTC/, 'the live provenance is still shown');
 });
 
+/* -------------------------------------- nearest-tool route map integration */
+function mapCardHTML(app) {
+  return app.html().match(/<div class="map-card" id="project-map">([\s\S]*?)<\/aside>/)[1];
+}
+
+test('borrowable tools render a route SVG, highlighted closest pin and estimated distance', async () => {
+  const app = createApp();
+  await app.flush();
+  await signIn(app, 'alice');
+  app.run(`state.tools = [
+    { id: 'secateurs', name: 'Secateurs', category: 'hand_trowel', availability: 'available',
+      owner: { id: 'bob', display_name: 'Bob' },
+      community: { ...state.me.community, latitude: 55.946, longitude: -3.188 } },
+    { id: 'own-tool', name: 'Own tool', category: 'hand_trowel', availability: 'available',
+      owner: { id: state.me.id, display_name: 'Alice' }, community: state.me.community },
+    { id: 'reserved-tool', name: 'Reserved tool', category: 'hand_trowel', availability: 'reserved',
+      owner: { id: 'carol', display_name: 'Carol' }, community: state.me.community }
+  ];`);
+  const extraGreens = GREEN.concat(Array.from({ length: 3 }, (_, i) => ({
+    id: `extra-${i}`, name: `Extra green ${i}`, latitude: 55.944, longitude: -3.189, distance_km: 0.2
+  })));
+  inject(app, providers(extraGreens, AIR, CARBON));
+
+  const card = mapCardHTML(app);
+  assert.match(card, /<h3>⌖ Your next little project<\/h3>/);
+  assert.match(card, /<svg[^>]*role="img" aria-label="Neighbourhood map"/);
+  assert.match(card, /<polyline class="route"/);
+  assert.match(card, /class="tool-pin nearest" data-id="secateurs"/);
+  assert.match(card, /class="nearest-halo"/);
+  assert.match(card, /Closest: Secateurs — about \d+ m \(estimated route\)/);
+  assert.doesNotMatch(card, /data-id="(?:own-tool|reserved-tool)"/, 'own and reserved tools are not map candidates');
+  assert.equal((card.match(/class="greenspace" /g) || []).length, 5, 'the SVG includes only the first five green spaces');
+  assert.match(card, /<h4>Green spaces nearby<\/h4>[\s\S]*class="green-list"/);
+  assert.ok(card.indexOf('</svg>') < card.indexOf('route-summary'), 'description sits below the SVG');
+  assert.ok(card.indexOf('route-summary') < card.indexOf('map-green-section'), 'the list stays below the route description');
+  assert.match(card, /Estimated grid route · straight-line distances from postcode centres/);
+});
+
+test('no borrowable tools produces the no_tools message without a route or closest tool', async () => {
+  const app = createApp();
+  await app.flush();
+  await signIn(app, 'alice');
+  inject(app, providers(GREEN, AIR, CARBON));
+  assert.equal(app.run('M.planNearestRoute(homeCommunity(), []).message'), 'no_tools');
+  assert.match(mapCardHTML(app), /No borrowable tools nearby yet\. Lend one and the route appears\./);
+
+  // Owning an available tool or seeing a busy neighbour's tool is still empty.
+  app.run(`state.tools = [
+    { id: 'own', name: 'Own tool', category: 'hand_trowel', availability: 'available',
+      owner: { id: state.me.id, display_name: 'Alice' }, community: state.me.community },
+    { id: 'busy', name: 'Busy tool', category: 'hand_trowel', availability: 'on_loan',
+      owner: { id: 'bob', display_name: 'Bob' }, community: state.me.community }
+  ]; render();`);
+  const card = mapCardHTML(app);
+  assert.match(card, /No borrowable tools nearby yet\. Lend one and the route appears\./);
+  assert.match(card, /<svg/, 'the map still shows You and green spaces');
+  assert.match(card, /class="you-label"/);
+  assert.doesNotMatch(card, /<polyline|class="tool-pin|Closest:/);
+  assert.match(card, /class="green-list"/, 'the green-space section is preserved');
+});
+
+test('browsing recomputes the map from home to visible tools, respects filters and uses honest UI copy', async () => {
+  const app = createApp();
+  await app.flush();
+  await signIn(app, 'alice');
+  inject(app, providers(GREEN, AIR, CARBON));
+  assert.match(mapCardHTML(app), /No borrowable tools nearby yet/);
+  app.element('#postcode').value = 'EH14 4AS';
+  app.submit('#postcode-form', {});
+  await app.flush();
+  const browsedGreen = [{ id: 'colinton-green', name: 'Colinton Green', distance_km: 0.1,
+    latitude: 55.9045, longitude: -3.249 }];
+  app.run(`state.browseEnvironment = ${JSON.stringify(providers(browsedGreen, AIR, CARBON))}; render();`);
+  const expected = app.run(`M.describeNearest(M.planNearestRoute(state.me.community,
+    state.browseTools.map(t => ({ ...t, latitude: t.community.latitude, longitude: t.community.longitude }))))`);
+  const card = mapCardHTML(app);
+  assert.ok(card.includes(expected), 'route starts at the home coordinates, not the browsed centre');
+  assert.match(card, /Closest: Colinton wheelbarrow/);
+  assert.match(card, /<polyline class="route"/);
+  assert.match(card, /Colinton Green/);
+  assert.doesNotMatch(card, /The Meadows/, 'both the map and list use the browsed environment');
+  assert.match(app.html(), /id="back-home"/);
+  assert.doesNotMatch(app.html(), /walk|navigat|导航/i, 'the UI never claims pedestrian or turn-by-turn guidance');
+
+  app.click({ dataset: { filter: 'cleanup' } });
+  assert.match(mapCardHTML(app), /No borrowable tools nearby yet/, 'category filters update map candidates');
+  app.click({ dataset: { filter: 'all' } });
+  assert.match(mapCardHTML(app), /Closest: Colinton wheelbarrow/);
+  app.input({ id: 'tool-search', value: 'no matching tool' });
+  assert.match(app.element('#project-map').innerHTML, /No borrowable tools nearby yet/, 'search repaints the map as well as the grid');
+  app.input({ id: 'tool-search', value: '' });
+  assert.match(app.element('#project-map').innerHTML, /Closest: Colinton wheelbarrow/);
+  assert.doesNotMatch(app.element('#project-map').innerHTML, /walk|navigat|导航/i);
+
+  app.click({ id: 'back-home' });
+  await app.flush();
+  assert.match(mapCardHTML(app), /No borrowable tools nearby yet/, 'returning home recomputes the route');
+  assert.doesNotMatch(mapCardHTML(app), /Colinton wheelbarrow|Colinton Green/);
+  assert.doesNotMatch(app.html(), /walk|navigat|导航/i);
+});
+
 /* -------------------------------------- boundary cases (reviewer findings) */
 
 test('European AQI band boundaries map to 30/23/15/8/3 at 20/40/60/80/81', async () => {
@@ -307,4 +423,185 @@ test('the green-access basis discloses the source cap of 5', async () => {
     .components.find(c => c.key === 'greenspace').scope;
   assert.match(scope, /capped at 5/, 'the component basis text states the source cap');
   assert.match(app.html(), /capped at 5/, 'the disclosed cap is rendered on the community page');
+});
+
+/* -------------------------------------- task meeting-point selection */
+function createPlaceApp(rejection) {
+  const server = createMockBackend();
+  const fetch = server.fetch;
+  const placesSent = [];
+  // Observe the real API client's JSON and inject an HTTP error without changing
+  // the shared harness (its task mock does not implement the OSM cache lookup).
+  server.fetch = async (url, init) => {
+    if (new URL(url).pathname === '/api/v1/tasks' && init.method === 'POST') {
+      const body = JSON.parse(init.body);
+      placesSent.push(body.place);
+      if (rejection && body.place.source === 'osm') return {
+        ok: false, status: 422,
+        text: async () => JSON.stringify({ error: { code: rejection.code, message: rejection.message, details: {} }, meta: {} })
+      };
+    }
+    return fetch(url, init);
+  };
+  return { app: createApp({ server }), placesSent };
+}
+function injectTaskPlaces(app, greens, attrs) {
+  inject(app, providers(greens, AIR, CARBON, attrs));
+  app.run("location.hash='#task'; render();");
+}
+function placePanelHTML(app) {
+  return app.html().match(/<fieldset class="place-panel" id="task-place-panel">[\s\S]*?<\/fieldset>/)[0];
+}
+function selectPlace(app, id) {
+  app.change({ dataset: { taskPlace: id }, checked: true });
+}
+
+test('selecting a green space creates an OSM action with the provider name, coordinates and source id', async () => {
+  const { app, placesSent } = createPlaceApp();
+  await app.flush();
+  await signIn(app, 'alice');
+  injectTaskPlaces(app, GREEN);
+  assert.match(placePanelHTML(app), /Where are we helping\?/);
+  assert.match(placePanelHTML(app), /data-task-place="" value="" checked/);
+  assert.match(placePanelHTML(app), /Community centre · EH8/);
+  assert.match(placePanelHTML(app), /Public Urban Park · 0\.10 km · straight-line distance/);
+  selectPlace(app, 'osm-2');
+  assert.match(placePanelHTML(app), /data-task-place="osm-2" value="osm-2" checked/);
+  app.click({ dataset: { template: 'park_cleanup' } });
+  await app.flush();
+  assert.deepEqual(placesSent[0], {
+    name: 'George Square Gardens', latitude: 55.9441, longitude: -3.1887, source: 'osm', source_id: 'osm-2'
+  });
+  const place = JSON.parse(app.run('JSON.stringify(myOpenTask().place)'));
+  assert.equal(place.name, 'George Square Gardens');
+  assert.equal(place.source, 'osm');
+  assert.equal(place.latitude, GREEN[1].latitude);
+  assert.equal(place.longitude, GREEN[1].longitude);
+  assert.match(app.html(), /id="place-name" value="George Square Gardens" maxlength="120" readonly/);
+  assert.doesNotMatch(app.html(), /name="task-place"/, 'open actions expose no place editor');
+  selectPlace(app, 'osm-1');
+  assert.equal(app.run('myOpenTask().place.name'), 'George Square Gardens', 'a forged change cannot edit an open action');
+  assert.equal(placesSent.length, 1);
+});
+
+test('the community-centre default remains selectable and sends the fixture home coordinates', async () => {
+  const { app, placesSent } = createPlaceApp();
+  await app.flush();
+  await signIn(app, 'alice');
+  injectTaskPlaces(app, GREEN);
+  selectPlace(app, 'osm-1');
+  selectPlace(app, '');
+  assert.match(placePanelHTML(app), /data-task-place="" value="" checked/);
+  app.click({ dataset: { template: 'park_cleanup' } });
+  await app.flush();
+  assert.deepEqual(placesSent[0], {
+    name: 'Community centre · EH8', latitude: app.server.community.latitude,
+    longitude: app.server.community.longitude, source: 'fixture', source_id: null
+  });
+  assert.equal(app.run('myOpenTask().place.source'), 'fixture');
+  assert.equal(app.run('myOpenTask().place.name'), 'Community centre · EH8');
+});
+
+test('green spaces beyond 2 km are disabled using coordinates rather than the provider distance label', async () => {
+  const { app, placesSent } = createPlaceApp();
+  await app.flush();
+  await signIn(app, 'alice');
+  injectTaskPlaces(app, [{ ...GREEN[0], id: 'far', name: 'Distant Park', latitude: 56.1, distance_km: 0.1 }]);
+  const panel = placePanelHTML(app);
+  assert.match(panel, /data-task-place="far" value="far"\s+disabled/);
+  assert.match(panel, /outside the 2 km action area/);
+  selectPlace(app, 'far'); // Even a synthetic change event must not bypass it.
+  assert.match(placePanelHTML(app), /data-task-place="" value="" checked/);
+  app.click({ dataset: { template: 'park_cleanup' } });
+  await app.flush();
+  assert.equal(placesSent[0].source, 'fixture');
+});
+
+test('missing, pending and empty green-space data degrade to only the working default option', async () => {
+  for (const [data, attrs] of [[null, {}], [[], {}], [{ outcode: 'EH8' }, {}], [GREEN, { greenspace: { status: 'unavailable' } }]]) {
+    const { app, placesSent } = createPlaceApp();
+    await app.flush();
+    await signIn(app, 'alice');
+    injectTaskPlaces(app, data, attrs);
+    const panel = placePanelHTML(app);
+    assert.equal((panel.match(/type="radio"/g) || []).length, 1);
+    assert.match(panel, /Green spaces appear when the environment card has data/);
+    assert.match(panel, /data-task-place="" value="" checked/);
+    app.click({ dataset: { template: 'park_cleanup' } });
+    await app.flush();
+    assert.equal(placesSent[0].source, 'fixture');
+    assert.equal(app.run('myOpenTask().place.name'), 'Community centre · EH8');
+  }
+});
+
+test('a task HTTP 422 shows the original server message and resets the place for a default retry', async () => {
+  // OUT_OF_RANGE also has a friendly tool-specific message in app.js; task 422s
+  // must show the server text even for that code, not the borrowing explanation.
+  for (const code of ['VALIDATION_ERROR', 'OUT_OF_RANGE']) {
+    const message = 'Selected OSM source_id is not in this community’s green-space cache.';
+    const { app, placesSent } = createPlaceApp({ code, message });
+    await app.flush();
+    await signIn(app, 'alice');
+    injectTaskPlaces(app, GREEN);
+    selectPlace(app, 'osm-2');
+    app.click({ dataset: { template: 'park_cleanup' } });
+    await app.flush();
+    assert.equal(app.element('#toast').textContent, message);
+    assert.equal(app.run('state.tasks.length'), 0);
+    assert.equal(app.run('ui.busy'), false);
+    assert.match(placePanelHTML(app), /data-task-place="" value="" checked/);
+    assert.match(app.html(), /Pick your little project/, 'the page remains usable');
+    app.click({ dataset: { template: 'park_cleanup' } });
+    await app.flush();
+    assert.deepEqual(placesSent.map(p => p.source), ['osm', 'fixture']);
+    assert.equal(app.run('myOpenTask().place.source'), 'fixture');
+  }
+});
+
+test('the task selector reads the browsed environment but enforces the home action area and clears stale choices', async () => {
+  const { app, placesSent } = createPlaceApp();
+  await app.flush();
+  await signIn(app, 'alice');
+  injectTaskPlaces(app, GREEN);
+  selectPlace(app, 'osm-2');
+  const browsed = [{ id: 'colinton-green', name: 'Colinton Green', type: 'Park', distance_km: 0.1,
+    latitude: 55.9045, longitude: -3.249 }];
+  app.run(`state.browse = ${JSON.stringify(app.server.otherCommunity)};
+    state.browseEnvironment = ${JSON.stringify(providers(browsed, AIR, CARBON))}; render();`);
+  const panel = placePanelHTML(app);
+  assert.match(panel, /Colinton Green/);
+  assert.doesNotMatch(panel, /George Square Gardens|The Meadows/);
+  assert.match(panel, /outside the 2 km action area/);
+  assert.match(panel, /Community centre · EH8/);
+  assert.match(panel, /data-task-place="" value="" checked/);
+  app.click({ dataset: { template: 'park_cleanup' } });
+  await app.flush();
+  assert.equal(placesSent[0].source, 'fixture');
+  assert.equal(placesSent[0].latitude, app.server.community.latitude);
+});
+
+test('a selected green space removed from the latest data falls back before the task write', async () => {
+  const { app, placesSent } = createPlaceApp();
+  await app.flush();
+  await signIn(app, 'alice');
+  injectTaskPlaces(app, GREEN);
+  selectPlace(app, 'osm-2');
+  // Change the data without rendering: the write itself must re-check it too.
+  app.run(`state.environment = ${JSON.stringify(providers([], AIR, CARBON))};`);
+  app.click({ dataset: { template: 'park_cleanup' } });
+  await app.flush();
+  assert.equal(placesSent[0].source, 'fixture');
+});
+
+test('invalid green coordinates cannot be selected and provider text stays HTML-escaped', async () => {
+  const app = createApp();
+  await app.flush();
+  await signIn(app, 'alice');
+  injectTaskPlaces(app, [{ ...GREEN[0], name: '<script>park</script>', type: '<b>Park</b>', latitude: null }]);
+  const panel = placePanelHTML(app);
+  assert.match(panel, /coordinates unavailable/);
+  assert.match(panel, /data-task-place="osm-1" value="osm-1"\s+disabled/);
+  assert.match(panel, /&lt;script&gt;park&lt;\/script&gt;/);
+  assert.match(panel, /&lt;b&gt;Park&lt;\/b&gt;/);
+  assert.doesNotMatch(panel, /<script>|<b>Park<\/b>/);
 });

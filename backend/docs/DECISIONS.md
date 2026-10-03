@@ -31,7 +31,7 @@
 
 ## 3. 演示身份不是真实注册
 
-- `POST /api/v1/demo/sessions` 只接受已存在于种子数据的 alias（alice / bob / carol），客户端不能传任意 `user_id` 创建身份。
+- `POST /api/v1/demo/sessions` 只接受已存在且激活的种子 alias（alice / bob / carol / dora / eve），客户端不能传任意 `user_id` 创建身份；前端登录选择器提供前三个账号。
 - `users` 表不存密码；会话表只存 token 的 SHA-256 摘要 + 创建/到期/注销时间。token 为 `secrets.token_urlsafe(32)`（≥32 随机字节）。
 - 演示账号仅用于比赛演示，任何界面/文档标注 "demo account"，不代表已验证居民身份。
 - （已废止，见第 10 节）~~访问码由运行时环境变量注入（见 `.env.example`），不写入源码、不写入种子数据。~~ 演示访问码已于 2026-10-03 移除，登录不再需要任何访问码。
@@ -64,7 +64,7 @@ Pydantic 校验错误统一转成 422 `VALIDATION_ERROR`，details 只含字段�
 
 业务接口一律 `Authorization: Bearer <token>`；不接受 `X-User-Id`、JSON 内 owner_id/borrower_id 或昵称作为身份。
 `get_current_user` 同时校验摘要、未过期、未注销、用户 `is_active`，任一失败统一 401 `UNAUTHENTICATED`。
-登录失败：同 IP 每分钟 ≥10 次失败后 429 `RATE_LIMITED`（进程内计数）。
+当前登录限流：同 IP 每分钟最多 60 次登录请求，超过后 429 `RATE_LIMITED`（进程内计数）。原「10 次失败」规则已由第 10 节覆盖。
 
 ## 5. availability 是计算字段，不存在 tools.status 列（规格 5.3）
 
@@ -79,10 +79,10 @@ Pydantic 校验错误统一转成 422 `VALIDATION_ERROR`，details 只含字段�
 A 前端读 `availability`；Loan 仍读自己的 `status`。唯一并发保护来自部分唯一索引
 `uq_loans_one_active_tool` / `uq_loans_one_active_requirement`（规格 5.2，迁移中原样创建）。
 
-## 6. 本阶段范围
+## 6. 地基阶段范围（历史记录，当前整合范围见第 11 节）
 
-- 已实现：健康检查、demo 登录/注销、`/me`、数据库迁移、种子数据、错误/信封/幂等/geo/constants 共享模块、空壳路由（tools/loans/tasks/community 留给后续任务）。
-- 未实现（后续任务）：工具发布与列表、借还状态机、任务与需求状态、社区/环境数据、真实外部适配器（`app/adapters/base.py` 只定义协议与 envelope，未发任何外部 HTTP）。
+- 当时已实现：健康检查、demo 登录/注销、`/me`、数据库迁移、种子数据、错误/信封/幂等/geo/constants 共享模块、空壳路由（tools/loans/tasks/community 留给后续任务）。
+- 当时未实现（后续已整合，非当前限制）：工具发布与列表、借还状态机、任务与需求状态、社区/环境数据、真实外部适配器。
 
 ## 7. 文档交付（2026-10-03）
 
@@ -217,6 +217,48 @@ docs/TEST_REPORT.md 第 4 节）。
 - 文档：`README.md`、`.env.example` 删除该环境变量条目；`API_SAMPLES.md` 登录示例
   只发 `user_alias` 并注明可选且被忽略；`TEST_REPORT.md` 追加本次实测记录。
 
-**已知遗留（不在本次授权文件范围内，未改动）**：
-`scripts/dev_server.sh`、`scripts/check_api.sh` 仍要求设置 `DEMO_ACCESS_CODE` 才能运行，
-其发送的 `access_code` 现在会被后端忽略（check_api.sh 仍可跑通，但需先随手设一个值）。
+**脚本收尾（同日整合完成）**：
+`scripts/dev_server.sh`、`scripts/check_api.sh` 的访问码强制校验已删除；
+`check_api.sh` 登录只发送 `user_alias`。旧访问码变量残留也不影响运行。
+`backend/README.md` 与 `.env.example` 已移除过期的脚本 workaround 和该变量名。
+实测无变量、残留短值两种情况下接口冒烟均为 4 passed / 0 failed。
+
+## 11. 本轮前后端整合（2026-10-03）
+
+### 11.1 邮编浏览与登录身份分离
+
+首页输入邮编后通过 resolve 获取目标社区，环境卡与工具列表切换为该社区；
+`Back to my street` 清除 browse 上下文，回到登录者 home 社区。
+浏览不修改 `/me`、owner / borrower 身份、任务归属或发布工具的 home 社区。
+跨街区可见不等于可借，后端保留距离与权限校验。
+
+### 11.2 两个有工具的演示街区
+
+- `EH8 9AB`：Alice / Bob / Carol，3 件工具（浇水壶、手铲、手套）。
+- `EH14 4AS`：Dora / Eve，4 件工具（垃圾夹、手套、浇水壶、手铲）。
+- `EH16 5AA` 无工具 fixture 继续用于距离边界测试，因此数据库是 3 个社区、5 个用户、7 件工具，不应把「两个演示街区」写成「只有两个社区行」。
+- 根目录 `./start.sh --reset` 重建以上种子；会删除已有业务数据。
+
+### 11.3 地图模块与接线边界
+
+`web/map-module.js` 使用合成网格、Haversine 边权与 A* 规划每件候选工具的路径，
+按路径成本选最近工具；同时提供 Dijkstra 用于参考与单测核对。
+并行前端整合将可借、非本人、当前筛选可见的工具接入地图卡片，并从 home 中心点规划。
+地图显示最近工具高亮、路线和估算距离，无工具/无坐标时降级。
+这不是实际道路导航；同邮编工具使用中心点，无法代表真实门牌或步行路径。
+
+### 11.4 队友交付并入
+
+- 绿地列表使用 C 的数据，按直线距离排序、标注来源；保留 integrations iframe override。
+- `Postcode green context score` 是区域公开数据上下文，不是社区行动影响；
+  缺 provider 时不显示总分，fixture 明示 demo snapshot，绿地来源最多 5 个。
+- `EH8 9AB` 离线环境 fixture 回落，与 `EH14 4AS` 的快照都明确 `source_kind=fixture`。
+- 模板切换复用已有开放任务，保留需求进度，避免同模板重复创建任务。
+
+### 11.5 当前验收与未完成范围
+
+本轮最终实测：pytest 203 passed（1 个 Starlette TestClient 弃用 warning）；
+Node 69 passed（地图 UI 接线新增 3 例，早先为 66）；临时真实后端 smoke 通过，
+首页邮编切换/返回另以 mock DOM 实测。命令与原始输出见 `TEST_REPORT.md` 第 7 节。
+没有宣称真实浏览器双窗口操作或真实道路导航已经验收。
+照片上传、多槽位/多数量需求、`would_have_bought_new` 问卷暂缓；真实注册与 production 认证未实现。

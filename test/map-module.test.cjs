@@ -234,14 +234,32 @@ test('renderMapSVG: highlight, route polyline, disclaimer, counts, no banned wor
   assert.ok(svg.includes('<circle class="tool-pin nearest" data-id="' + res.nearest.tool.id + '"'),
     'nearest pin highlighted');
   assert.equal((svg.match(/class="tool-pin(?! nearest)/g) || []).length, 3, 'other three pins');
-  assert.ok(svg.includes('nearest-halo'));
+  assert.equal((svg.match(/class="tool-pin(?: nearest)?"/g) || []).length, 4, 'every borrowable tool has a pin');
+  const nearestPin = svg.match(/<circle class="tool-pin nearest"[^>]+/)[0];
+  const ordinaryPins = [...svg.matchAll(/<circle class="tool-pin"[^>]+/g)].map(m => m[0]);
+  assert.match(nearestPin, /fill="#c9a24a"/);
+  ordinaryPins.forEach(pin => assert.match(pin, /fill="#dd885c"/));
+  assert.notEqual(nearestPin.match(/fill="([^"]+)"/)[1], ordinaryPins[0].match(/fill="([^"]+)"/)[1]);
+  assert.equal(Number(nearestPin.match(/ r="([^"]+)"/)[1]),
+    Number(ordinaryPins[0].match(/ r="([^"]+)"/)[1]) * 1.2, 'highlight is 20% larger');
+  assert.equal((svg.match(/class="nearest-halo"/g) || []).length, 2, 'two halo layers');
+  assert.match(svg, /class="nearest-halo" data-layer="outer"[^>]*opacity="0.15"/);
+  assert.match(svg, /class="nearest-halo" data-layer="inner"/);
+  assert.match(svg, /class="nearest-label"[^>]*>Secateurs</);
+  assert.match(svg, /class="route"[^>]*stroke-dasharray="4 4"/);
+  assert.equal((svg.match(/class="route-endpoint"/g) || []).length, 2);
+  assert.match(svg, /class="you-dot"[^>]*fill="#284e3c"[^>]*stroke="#ffffff"/);
+  const legend = svg.match(/<g class="legend"[\s\S]*?<\/g>/)[0];
+  for (const [kind, color] of Object.entries({ you: '#284e3c', tool: '#dd885c', closest: '#c9a24a', green: '#9db88a' })) {
+    assert.match(legend, new RegExp(`data-kind="${kind}"[^>]*fill="${color}"`));
+  }
   // greenspaces
   assert.equal((svg.match(/class="greenspace"/g) || []).length, 2);
   assert.equal((svg.match(/class="greenspace"/g) || []).length, GREENS.length);
   // disclaimer + legend + You label
   assert.ok(svg.includes(M.ROUTE_NOTE));
   assert.ok(svg.includes('Estimated grid route'));
-  for (const item of ['>You<', 'Tools', 'Closest', 'Green space']) {
+  for (const item of ['>You<', 'Borrowable', 'Closest', 'Green space']) {
     assert.ok(svg.includes(item), 'legend/item missing: ' + item);
   }
   // product red line: no forbidden wording anywhere in the output
@@ -258,7 +276,7 @@ test('renderMapSVG survives empty/partial input', () => {
   const partial = M.renderMapSVG({ you: YOU, tools: [NEAR] });
   assert.ok(!/walk|navigat|导航/i.test(partial));
   assert.equal((partial.match(/class="tool-pin/g) || []).length, 1);
-  // ids are XML-escaped inside attributes (tool names never enter the markup)
+  // IDs and tooltip names are XML-escaped inside the SVG.
   const tricky = M.renderMapSVG({
     you: YOU,
     tools: [tool('a&b"><x', 55.95, -3.18, { name: 'Rake & <spade>"' })]
@@ -266,6 +284,82 @@ test('renderMapSVG survives empty/partial input', () => {
   assert.ok(tricky.includes('data-id="a&amp;b&quot;&gt;&lt;x"'), tricky);
   assert.ok(!tricky.includes('<x'));
   assert.ok(!tricky.includes('<spade>'));
+});
+
+function pinCoordinates(svg) {
+  return [...svg.matchAll(/<circle class="tool-pin(?: nearest)?"[^>]*data-id="([^"]+)"[^>]*cx="([^"]+)" cy="([^"]+)"/g)]
+    .map(m => ({ id: m[1], x: Number(m[2]), y: Number(m[3]) }));
+}
+
+function assertSeparated(points, minimum = 14) {
+  for (let i = 0; i < points.length; i++) {
+    for (let j = i + 1; j < points.length; j++) {
+      const distance = Math.hypot(points[i].x - points[j].x, points[i].y - points[j].y);
+      assert.ok(distance >= minimum - 0.02, `${points[i].id}/${points[j].id}: ${distance.toFixed(2)} px`);
+    }
+  }
+}
+
+test('screen-space separation survives shared coordinates and a 10km+ extent', () => {
+  const cluster = Array.from({ length: 30 }, (_, i) => tool(`cluster-${i}`, YOU.latitude, YOU.longitude));
+  const tools = cluster.concat(tool('distant', YOU.latitude + 0.2, YOU.longitude + 0.3));
+  const result = M.planNearestRoute(YOU, tools);
+  assert.ok(M.haversineMeters(YOU, tools.at(-1)) > 10000);
+  const options = { you: YOU, tools, nearest: result.nearest, path: result.path };
+  const svg = M.renderMapSVG(options);
+  const pins = pinCoordinates(svg);
+  assert.equal(pins.length, tools.length);
+  assert.deepEqual(new Set(pins.map(p => p.id)), new Set(tools.map(t => t.id)));
+  const origin = svg.match(/class="you-dot" cx="([^"]+)" cy="([^"]+)"/);
+  assertSeparated(pins.concat({ id: 'You', x: Number(origin[1]), y: Number(origin[2]) }));
+  pins.forEach(p => {
+    assert.ok(p.x >= 28 && p.x <= 292, 'pin stays inside horizontal padding');
+    assert.ok(p.y >= 28 && p.y <= 156, 'pin stays inside vertical padding');
+  });
+  assert.equal(svg, M.renderMapSVG(options), 'repeatable layout');
+  const reordered = pinCoordinates(M.renderMapSVG({ ...options, tools: tools.slice().reverse() }));
+  assertSeparated(reordered);
+  assert.ok(svg.includes('pin-leader'), 'displaced points retain geographic connectors');
+});
+
+test('green-space labels are capped and label pills do not collide with pins or each other', () => {
+  const greenspaces = Array.from({ length: 7 }, (_, i) => ({
+    id: `green-${i}`, name: `Neighbourhood green ${i}`, latitude: YOU.latitude, longitude: YOU.longitude
+  }));
+  const result = M.planNearestRoute(YOU, [NEAR, MID, FAR, CLOSE]);
+  const svg = M.renderMapSVG({ you: YOU, tools: [NEAR, MID, FAR, CLOSE], greenspaces,
+    nearest: result.nearest, path: result.path });
+  assert.equal((svg.match(/class="greenspace"/g) || []).length, 7, 'all green-space marks retained');
+  const count = (svg.match(/class="greenspace-label"/g) || []).length;
+  assert.equal(count, 3, 'only nearest three receive names');
+  assert.match(svg, />\+4 green spaces</);
+  const boxes = [...svg.matchAll(/class="map-label-bg" x="([^"]+)" y="([^"]+)" width="([^"]+)" height="([^"]+)"/g)]
+    .map(m => ({ x: +m[1], y: +m[2], w: +m[3], h: +m[4] }));
+  for (let i = 0; i < boxes.length; i++) {
+    const a = boxes[i];
+    assert.ok(a.x >= 16 && a.x + a.w <= 304 && a.y >= 16 && a.y + a.h <= 168);
+    for (const b of boxes.slice(i + 1)) {
+      assert.ok(a.x + a.w <= b.x || b.x + b.w <= a.x || a.y + a.h <= b.y || b.y + b.h <= a.y,
+        'label boxes do not overlap');
+    }
+    for (const pin of pinCoordinates(svg)) {
+      const dx = pin.x - Math.max(a.x, Math.min(a.x + a.w, pin.x));
+      const dy = pin.y - Math.max(a.y, Math.min(a.y + a.h, pin.y));
+      assert.ok(Math.hypot(dx, dy) >= 9.98, 'label does not cover a pin');
+    }
+  }
+});
+
+test('names, captions and tooltip copy are escaped and forbidden wording is stripped', () => {
+  const t = tool('special', 55.95, -3.18, { name: 'Walking <spade> & navigation 导航' });
+  const svg = M.renderMapSVG({ you: YOU, tools: [t], nearest: t,
+    greenspaces: [{ id: 'green', name: 'Walker & <green>', latitude: 55.951, longitude: -3.19 }],
+    caption: 'Walking navigation 导航' });
+  assert.doesNotMatch(svg, /walk|navigat|导航/i);
+  assert.doesNotMatch(svg, /<spade>|<green>/);
+  assert.match(svg, /&lt;spade&gt;/);
+  assert.match(svg, /&amp;/);
+  assert.match(svg, /class="nearest-label"/);
 });
 
 /* -------------------------------------------------- describeNearest copy */
