@@ -225,12 +225,23 @@ docs/TEST_REPORT.md 第 4 节）。
 
 ## 11. 本轮前后端整合（2026-10-03）
 
-### 11.1 邮编浏览与登录身份分离
+### 11.1 邮编即搬家：home 社区跟随输入的邮编
 
-首页输入邮编后通过 resolve 获取目标社区，环境卡与工具列表切换为该社区；
-`Back to my street` 清除 browse 上下文，回到登录者 home 社区。
-浏览不修改 `/me`、owner / borrower 身份、任务归属或发布工具的 home 社区。
-跨街区可见不等于可借，后端保留距离与权限校验。
+首页输入邮编后调用 `POST /api/v1/me/community`（demo 搬家写操作，与其他业务写一样
+需要 `Idempotency-Key`），把当前账号的 home 社区指向该邮编；随后环境卡、工具列表、
+任务、发布工具与借还全部从这一个 home 上下文刷新。旧的只读 browse 上下文
+（`browse` / `browseTools` / `browseEnvironment`、`currentCommunity` 等）已整体删除，
+社区页不再有独立于账号的第二套社区状态；`resolveCommunity` 仍保留为只读的
+`GET /communities/resolve` 客户端封装，但它不再驱动社区页。
+
+提示条为 `You moved to <postcode> (<outcode>). Your previous street is <home>.`，
+按钮 `Back to my previous street` 调用同一写接口搬回上一个邮编。上一个邮编仅作为 UI
+提示存入 `localStorage`（`bnd.previousHomePostcode`，与 token/display name 一样属于
+UI 偏好而非业务数据）：账号的权威社区始终以 `GET /api/v1/me` 为准，刷新后由它重建
+“上一条街”入口，且当提示等于当前 home 时会被丢弃，避免提示出一个用户没选过的社区。
+输入当前邮编是空操作：不发写、不改账号，只提示 `<postcode> is already your home street.`。
+写操作对无法解析的邮编返回 422 `INVALID_POSTCODE` 且账号不变。跨街区可见不等于可借，
+后端保留距离与权限校验（借用范围为当前 home 街区 2 km 内）。
 
 ### 11.2 两个有工具的演示街区
 

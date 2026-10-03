@@ -215,6 +215,12 @@
           .then(function (data) { token = null; return data; });
       },
       me: function () { return request('/me'); },
+      // Move the signed-in demo account's home community (the demo "move my
+      // street" action). A business write, so it goes through the same
+      // intent()/Idempotency-Key path as createTool/createTask.
+      setHomeCommunity: function (postcode) {
+        return intent().post('/me/community', { postcode: postcode });
+      },
 
       /* ---- tasks ---- */
       taskTemplates: function () { return request('/task-templates'); },

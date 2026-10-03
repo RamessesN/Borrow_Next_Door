@@ -36,6 +36,7 @@ const TRANSITION_TOAST = {
 /* ------------------------------------------------------------- session only */
 const TOKEN_KEY = 'bnd.token';
 const USER_KEY = 'bnd.user';
+const PREV_KEY = 'bnd.previousHomePostcode';
 const readStore = k => { try { return localStorage.getItem(k); } catch { return null; } };
 const writeStore = (k, v) => { try { localStorage.setItem(k, v); } catch { /* private mode */ } };
 const dropStore = k => { try { localStorage.removeItem(k); } catch { /* private mode */ } };
@@ -47,10 +48,9 @@ function freshState() {
   return {
     me: null, templates: [], tools: [], tasks: [], loans: [],
     environment: null, impact: null, names: {},
-    /* Browse context: null = looking at my own (home) community; otherwise the
-       community resolved from the postcode the visitor typed. Only the
-       community home page follows it — tasks and loans stay on the account. */
-    browse: null, browseTools: null, browseEnvironment: null
+    /* The postcode the account moved away from, so the UI can offer a
+       one-click way back; null once there is nothing to return to. */
+    previousHomePostcode: null
   };
 }
 let state = freshState();
@@ -64,17 +64,30 @@ function buildNames() {
   const add = (id, name) => { if (id && name) names[id] = name; };
   if (state.me) add(state.me.id, state.me.display_name);
   state.tools.forEach(t => add(t.owner.id, t.owner.display_name));
-  (state.browseTools || []).forEach(t => add(t.owner.id, t.owner.display_name));
   state.tasks.forEach(t => add(t.creator.id, t.creator.display_name));
   state.names = names;
 }
 const nameOf = id => (state.me && state.me.id === id && state.me.display_name) || state.names[id] || 'A neighbour';
 const soft = promise => promise.catch(err => { if (err && err.code === 'UNAUTHENTICATED') throw err; return null; });
 const groupOf = category => (D.CATEGORIES[category] || {}).group || '';
+/* Client-side mirror of the backend's postcode normalisation (trim, uppercase,
+   collapse spaces) so checking the street you are already in is a no-op that
+   never reaches the move endpoint. */
+const normalisePostcode = v => String(v || '').trim().toUpperCase().replace(/\s+/g, ' ');
+/* The stored previous street is a UI hint only — the authoritative community is
+   always the server's /me — so it is only offered while it differs from the
+   current home; a hint pointing at home is stale and dropped. */
+function restorePreviousHome() {
+  const stored = readStore(PREV_KEY);
+  if (stored && stored !== homePostcode()) { state.previousHomePostcode = stored; return; }
+  if (stored) dropStore(PREV_KEY);
+  state.previousHomePostcode = null;
+}
 
 /* ------------------------------------------------------------------- loading */
 async function loadAll() {
   state.me = await client.me();
+  restorePreviousHome();
   await refresh();
 }
 async function refresh() {
@@ -102,24 +115,6 @@ async function refresh() {
   state.environment = environment;
   state.impact = impact;
   buildNames();
-  await refreshBrowse();
-}
-
-/** While browsing another postcode, keep that community's environment card and
- *  tool list in step with the home data refreshed above. Failures keep the
- *  previous paint rather than blanking the page. */
-async function refreshBrowse() {
-  if (!state.browse) return;
-  const bid = state.browse.id;
-  const [environment, tools] = await Promise.all([
-    soft(client.communityEnvironment(bid)),
-    soft(client.listTools({ community_id: bid, radius_m: 2000, limit: 100 }))
-  ]);
-  if (state.browse && state.browse.id === bid) {
-    if (environment) state.browseEnvironment = environment;
-    if (tools) state.browseTools = tools;
-    buildNames();
-  }
 }
 
 /* ------------------------------------------------------------------ geometry */
@@ -135,16 +130,12 @@ function slot(name, placeholder){const raw=window.BND_INTEGRATIONS?.[name];if(!r
 
 /* ------------------------------------------------------------------ routing */
 function page(){return ['community','task','loans'].includes(location.hash.slice(1))?location.hash.slice(1):'community';}
-/* The signed-in account's own community — what tasks, loans and lending use. */
+/* The signed-in account's own community — what tasks, loans, lending and the
+   whole community page follow. Checking a postcode moves this, so there is
+   exactly one community context, never a separate browse one. */
 const homeCommunity = () => (state.me ? state.me.community : null);
 const homePostcode = () => (state.me ? state.me.community.postcode : '');
 const homeOutcode = () => (state.me ? state.me.community.outcode : '');
-/* What the community home page is showing: the browsed postcode's community,
-   or the account's own when nothing has been checked. */
-const currentCommunity = () => state.browse || homeCommunity();
-const postcode = () => { const c = currentCommunity(); return c ? c.postcode : ''; };
-const visibleTools = () => (state.browse ? (state.browseTools || []) : state.tools);
-const visibleEnvironment = () => (state.browse ? state.browseEnvironment : state.environment);
 const myTasks = () => state.tasks.filter(t => state.me && t.creator && t.creator.id === state.me.id);
 const myOpenTask = () => myTasks().find(t => t.status === 'open' && t.id === ui.selectedTaskId) || myTasks().filter(t => t.status === 'open')
   .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)))[0] || null;
@@ -229,7 +220,7 @@ function handleError(err, opts) {
     return;
   }
   const FRIENDLY = {
-    OUT_OF_RANGE: 'That tool is in another neighbourhood. Borrowing works within 2 km — browsing is fine.',
+    OUT_OF_RANGE: 'That tool is in another neighbourhood. Borrowing works within 2 km of your street.',
     TOOL_UNAVAILABLE: 'This tool is already reserved or on loan.',
     TOOL_ARCHIVED: 'That tool is no longer listed.',
     SELF_BORROW_FORBIDDEN: 'That is your own tool — a neighbour has to borrow it.',
@@ -272,7 +263,7 @@ const ENV_READING = {
   carbon_intensity: { field: 'clean_energy_percentage', unit: '% clean electricity', scope: 'Regional grid zone' }
 };
 function envCard(icon, title, providerKey, source) {
-  const p = provider(visibleEnvironment(), providerKey);
+  const p = provider(state.environment, providerKey);
   const spec = ENV_READING[providerKey] || { field: null, unit: '', scope: '' };
   const ok = isFreshProvider(p);
   const value = ok && p.data && spec.field ? finiteNumber(p.data[spec.field]) : null;
@@ -297,7 +288,7 @@ function envCard(icon, title, providerKey, source) {
   return `<div class="env-card">${slot(title === 'The air around you' ? 'air' : 'electricity', inner)}</div>`;
 }
 function listedTools() {
-  return visibleTools().filter(t => t.availability !== 'archived' &&
+  return state.tools.filter(t => t.availability !== 'archived' &&
     String(t.name || '').toLowerCase().includes(ui.search.toLowerCase()) &&
     (ui.filter === 'all' || ui.filter === 'available' && t.availability === 'available' ||
      ui.filter === 'garden' && groupOf(t.category) === 'garden' ||
@@ -307,10 +298,8 @@ function toolCards() {
   const me = state.me;
   const tools = listedTools();
   if (!tools.length) {
-    const where = esc(postcode());
-    return state.browse
-      ? `<div class="empty"><h3>Nothing listed in ${where} yet.</h3><p>No tools match this search in ${where}. Lending still happens in your home community, ${esc(homePostcode())}.</p><button class="btn secondary" data-publish>Lend a tool at home ↗</button></div>`
-      : `<div class="empty"><h3>A little room for sharing.</h3><p>No tools match this search in ${where}.</p><button class="btn secondary" data-publish>Lend the first tool ↗</button></div>`;
+    const where = esc(homePostcode());
+    return `<div class="empty"><h3>A little room for sharing.</h3><p>No tools match this search in ${where}.</p><button class="btn secondary" data-publish>Lend the first tool ↗</button></div>`;
   }
   return tools.map(t => {
     const own = me && t.owner.id === me.id;
@@ -320,31 +309,30 @@ function toolCards() {
     return `<article class="tool-card"><div class="tool-art ${esc(SVG_KEY[t.category] || 'spade')}">${toolSVG(SVG_KEY[t.category])}<span class="tool-status ${t.availability === 'available' ? '' : 'busy'}"><i></i>${esc(statusLabel)}</span></div><div class="tool-body"><h3>${esc(t.name)}</h3><span class="tool-owner">${esc(t.owner.display_name)}’s tool · ${esc(t.community.postcode)}${distance}</span><div class="tool-bottom"><span>Free to borrow</span><button data-borrow="${esc(t.id)}" ${t.availability !== 'available' || own || far ? 'disabled' : ''}>${own ? 'Your tool' : far ? 'Too far to borrow' : t.availability === 'available' ? 'Borrow ↗' : 'Unavailable'}</button></div></div></article>`;
   }).join('');
 }
-/* The line under the postcode box: plain status at home, or the browse banner
-   with the way back once another postcode has been checked. */
+/* The line under the postcode box: plain status, plus a one-click way back
+   once checking a postcode has moved the account to a new street. */
 function postcodeMessage() {
-  if (state.browse) {
-    return `<span>Browsing ${esc(state.browse.postcode)} (${esc(state.browse.outcode)}). Your lending home stays ${esc(homePostcode())}.</span> <button type="button" id="back-home">Back to my street</button>`;
+  if (state.previousHomePostcode) {
+    return `<span>You moved to ${esc(homePostcode())} (${esc(homeOutcode())}). Your previous street is ${esc(state.previousHomePostcode)}.</span> <button type="button" id="back-home">Back to my previous street</button>`;
   }
   return `<span>Your community: ${esc(homePostcode())} · served by the backend</span>`;
 }
 function community() {
   const me = state.me;
   const banner = state.impact;
-  const shown = currentCommunity();
-  const shownOutcode = esc(shown ? shown.outcode : '');
-  return `<section class="hero"><div class="hero-copy"><span class="location"><i></i> Small actions. Right on your doorstep.</span><h1>A little sharing.<br>A <em>greener</em><br>neighbourhood.</h1><p>The tools you need might be just next door.<br>Borrow, lend, and make your patch a little better.</p><form class="postcode-form" id="postcode-form"><span aria-hidden="true">⌖</span><input id="postcode" aria-label="Your UK postcode" value="${esc(postcode())}" maxlength="10" required><button type="submit">Check a postcode ↗</button></form><p class="field-message" id="postcode-message">${postcodeMessage()}</p></div><div class="hero-art">${gardenArt()}<span class="art-note">Good things grow together.</span><div class="art-label"><div class="mini-avatars"><span>A</span><span>B</span><span>♡</span></span></span></div></div></section>
-<section><div class="section-heading"><div><h2>A small look at your local patch</h2><p>Environmental context for ${esc(postcode())} — reported per provider by the API.</p></div><span class="eyebrow">${state.browse ? `BROWSING ${esc(state.browse.outcode)}` : 'YOUR POSTCODE, TOGETHER'}</span></div><div class="environment">${envCard('≋','The air around you','air_quality','Open-Meteo')}${envCard('ϟ','Your regional electricity','carbon_intensity','NESO Carbon Intensity')}<div class="env-card"><span class="env-icon">♧</span><div><h3>Room to grow</h3><strong>${esc(greenspaceLabel())}</strong><p>Green spaces near ${shownOutcode}</p></div></div></div>${contextScoreCard()}</section>
+  const shownOutcode = esc(homeOutcode());
+  return `<section class="hero"><div class="hero-copy"><span class="location"><i></i> Small actions. Right on your doorstep.</span><h1>A little sharing.<br>A <em>greener</em><br>neighbourhood.</h1><p>The tools you need might be just next door.<br>Borrow, lend, and make your patch a little better.</p><form class="postcode-form" id="postcode-form"><span aria-hidden="true">⌖</span><input id="postcode" aria-label="Your UK postcode" value="${esc(homePostcode())}" maxlength="10" required><button type="submit">Check a postcode ↗</button></form><p class="field-message" id="postcode-message">${postcodeMessage()}</p></div><div class="hero-art">${gardenArt()}<span class="art-note">Good things grow together.</span><div class="art-label"><div class="mini-avatars"><span>A</span><span>B</span><span>♡</span></span></span></div></div></section>
+<section><div class="section-heading"><div><h2>A small look at your local patch</h2><p>Environmental context for ${esc(homePostcode())} — reported per provider by the API.</p></div><span class="eyebrow">YOUR POSTCODE, TOGETHER</span></div><div class="environment">${envCard('≋','The air around you','air_quality','Open-Meteo')}${envCard('ϟ','Your regional electricity','carbon_intensity','NESO Carbon Intensity')}<div class="env-card"><span class="env-icon">♧</span><div><h3>Room to grow</h3><strong>${esc(greenspaceLabel())}</strong><p>Green spaces near ${shownOutcode}</p></div></div></div>${contextScoreCard()}</section>
 <div class="workspace"><section><div class="section-heading"><div><h2>Good tools. Great neighbours.</h2><p>Something sitting in your shed could start something good.</p></div><button class="btn secondary" data-publish>＋ Lend a tool</button></div><div class="filterbar"><div class="filters">${[['all','All tools'],['garden','Gardening'],['cleanup','Clean-up'],['available','Available']].map(([v,l])=>`<button class="chip ${ui.filter===v?'active':''}" data-filter="${v}">${l}</button>`).join('')}</div><input class="search-input" id="tool-search" value="${esc(ui.search)}" placeholder="Search tools…" aria-label="Search tools"></div><div class="tool-grid" id="tool-grid">${toolCards()}</div></section><aside><div class="action-card"><span class="eyebrow">LET’S DO SOME GOOD</span><span class="flower">✳</span><h2>A greener street<br>starts with us.</h2><p>Pick a small action. Find the tools.<br>Make a difference, together.</p><a class="btn primary" href="#task">Start a community action <span>↗</span></a></div><div class="map-card" id="project-map">${projectMapCard()}</div></aside></div><div class="bottom-banner"><span>✳</span><div><strong>The more we share, the more we can do.</strong><p>${banner ? `${banner.active_tools_count} tools shared · ${banner.returned_loans_count} returned loans · ${banner.completed_tasks_count} completed actions in ${esc(me.community.outcode)}.` : 'A missing litter picker today. A whole community clean-up tomorrow.'}</p></div><button class="text-button" data-publish>Be someone’s helpful neighbour ↗</button></div>`;
 }
 /* ToolResponse locates a tool at its community's postcode centre. The origin
-   stays the signed-in user's home even when the visible postcode changes. */
+   is the signed-in user's home community, which follows the checked postcode. */
 function projectMapCard() {
   const you = homeCommunity();
   const tools = listedTools()
     .filter(t => t.availability === 'available' && t.owner.id !== state.me.id)
     .map(t => ({ ...t, latitude: t.community.latitude, longitude: t.community.longitude }));
-  const green = provider(visibleEnvironment(), 'greenspace');
+  const green = provider(state.environment, 'greenspace');
   const greenspaces = isFreshProvider(green) && Array.isArray(green.data) ? green.data.slice(0, 5) : [];
   const plan = M.planNearestRoute(you, tools);
   const map = M.renderMapSVG({ you, tools, greenspaces, path: plan.path, nearest: plan.nearest });
@@ -355,7 +343,7 @@ function projectMapCard() {
   return `<h3>⌖ Your next little project</h3>${slot('map', native)}`;
 }
 function greenspaceLabel() {
-  const p = provider(visibleEnvironment(), 'greenspace');
+  const p = provider(state.environment, 'greenspace');
   if (p && (p.status === 'ok' || p.status === 'cached')) return p.attribution || 'Connected';
   return 'Find a green space';
 }
@@ -385,13 +373,13 @@ function providerGap(p, source, emptyReason) {
  *  with straight-line distance and an honest degraded state that tells an
  *  empty answer apart from a source still pending. */
 function greenSpacePanel() {
-  const p = provider(visibleEnvironment(), 'greenspace');
+  const p = provider(state.environment, 'greenspace');
   const places = isFreshProvider(p) && Array.isArray(p.data)
     ? p.data.filter(pl => pl && typeof pl.name === 'string') : [];
   if (!places.length) {
     const source = (p && (p.source || p.attribution)) || 'OpenStreetMap Overpass API';
     const detail = providerGap(p, source, 'answered with no named green spaces');
-    return `<div class="map-placeholder"><span class="map-symbol">⌑</span><b>Green spaces near ${esc(currentCommunity().outcode)}</b><small>${esc(detail)}.</small></div>`;
+    return `<div class="map-placeholder"><span class="map-symbol">⌑</span><b>Green spaces near ${esc(homeOutcode())}</b><small>${esc(detail)}.</small></div>`;
   }
   const nearestFirst = places.slice().sort((a, b) => (finiteNumber(a.distance_km) ?? Infinity) - (finiteNumber(b.distance_km) ?? Infinity));
   const rows = nearestFirst.map(pl => {
@@ -426,13 +414,12 @@ function aqiBandPoints(aqi) {
  *  appears only when all three providers answer; a missing provider is never
  *  treated as zero. */
 function greenContextScore() {
-  // Follow the browsed postcode like every other environment consumer: the
-  // three provider cards and the green-space list already read
-  // visibleEnvironment(), so reading state.environment here left the score
-  // showing the home community while the rest of the page had moved.
-  const green = provider(visibleEnvironment(), 'greenspace');
-  const air = provider(visibleEnvironment(), 'air_quality');
-  const carbon = provider(visibleEnvironment(), 'carbon_intensity');
+  // The community page has a single context now that home follows the checked
+  // postcode: the three provider cards, the green-space list and this score all
+  // read state.environment, so they can never disagree about the community.
+  const green = provider(state.environment, 'greenspace');
+  const air = provider(state.environment, 'air_quality');
+  const carbon = provider(state.environment, 'carbon_intensity');
   const missing = [];
 
   const distances = isFreshProvider(green) && Array.isArray(green.data)
@@ -510,14 +497,15 @@ function defaultTaskPlace() {
   return { name: `Community centre · ${c.outcode}`, latitude: c.latitude, longitude: c.longitude, source: 'fixture', source_id: null };
 }
 function taskPlaceOptions() {
-  const green = provider(visibleEnvironment(), 'greenspace');
+  const green = provider(state.environment, 'greenspace');
   const places = isFreshProvider(green) && Array.isArray(green.data)
     ? green.data.filter(p => p && typeof p.name === 'string' && p.name.trim() && p.id !== null && p.id !== undefined) : [];
   return places.map(p => {
     const latitude = finiteNumber(p.latitude), longitude = finiteNumber(p.longitude);
     const valid = latitude !== null && longitude !== null && Math.abs(latitude) <= 90 && Math.abs(longitude) <= 180;
-    // Provider distance_km describes its visible postcode, not necessarily the
-    // account's home. The backend always creates actions in the home community.
+    // Provider distance_km describes the home postcode's environment. The
+    // backend always creates actions in the account's home community, which
+    // follows the last checked postcode.
     const metres = valid ? M.haversineMeters(homeCommunity(), { latitude, longitude }) : Infinity;
     const reason = !valid ? 'coordinates unavailable' : metres > 2000 ? 'outside the 2 km action area' : '';
     return { id: String(p.id), type: p.type || 'Green space', distance: finiteNumber(p.distance_km), disabled: !!reason, reason,
@@ -525,7 +513,7 @@ function taskPlaceOptions() {
   });
 }
 function selectedTaskPlace(options = taskPlaceOptions()) {
-  const contextId = currentCommunity().id;
+  const contextId = homeCommunity().id;
   const selected = ui.selectedPlaceCommunityId === contextId
     ? options.find(p => p.id === ui.selectedPlaceId && !p.disabled) : null;
   if (!selected) { ui.selectedPlaceId = null; ui.selectedPlaceCommunityId = contextId; }
@@ -680,42 +668,49 @@ async function postcodeSubmit(form, btn) {
   const value = String(input ? input.value : '').trim();
   if (!value) return;
   await action(btn, async () => {
-    const community = await client.resolveCommunity(value);
-    const home = homeCommunity();
-    // Checking the postcode you already live in just returns to home context.
-    if (home && community.id === home.id && community.postcode === home.postcode) {
-      const wasBrowsing = !!state.browse;
-      state.browse = null; state.browseTools = null; state.browseEnvironment = null;
-      if (wasBrowsing) await refresh();
+    const previous = homePostcode();
+    // Checking the postcode you are already in is a confirmed no-op: the
+    // normalised value never reaches the move endpoint, so no write is made.
+    if (previous && normalisePostcode(value) === normalisePostcode(previous)) {
+      await refresh();
       render();
-      toast(wasBrowsing ? `Back to your street: ${home.postcode}.` : `${home.postcode} is already your home street.`);
+      toast(`${previous} is already your home street.`);
       return;
     }
-    // Browse that community: pull ITS environment card and tool list, then
-    // repaint the community home page from them.
-    const [environment, tools] = await Promise.all([
-      client.communityEnvironment(community.id),
-      client.listTools({ community_id: community.id, radius_m: 2000, limit: 100 })
-    ]);
-    state.browse = community;
-    state.browseEnvironment = environment;
-    state.browseTools = tools;
-    buildNames();
+    // Move the account's own home community, then repaint every surface from
+    // that one context: header identity, environment, score, tools, tasks.
+    state.me = await client.setHomeCommunity(value);
+    // The server may normalise a differently-spelled value onto the street we
+    // are already in; that is still a no-op, so no way back is recorded.
+    if (!previous || state.me.community.postcode === previous) {
+      await refresh();
+      render();
+      toast(`${state.me.community.postcode} is already your home street.`);
+      return;
+    }
+    state.previousHomePostcode = previous;
+    writeStore(PREV_KEY, previous);
+    await refresh();
     render();
-    toast(`Browsing ${community.postcode}. Your lending home stays ${homePostcode()}.`);
+    toast(`You are now in ${state.me.community.postcode}.`);
   }, { onError: err => {
-    // 422 INVALID_POSTCODE (or a network failure): keep the message verbatim
-    // under the box and leave the current browse context alone.
+    // 422 INVALID_POSTCODE (or a network failure): the account only ever moves
+    // on a successful response, so the current community stays untouched. Show
+    // the server message verbatim under the box.
     const msg = $('#postcode-message');
     if (msg) { msg.textContent = err.message; msg.classList.add('error'); }
   } });
 }
 async function backToHome(btn) {
+  const previous = state.previousHomePostcode;
+  if (!previous) return;
   await action(btn, async () => {
-    state.browse = null; state.browseTools = null; state.browseEnvironment = null;
-    await refresh();   // re-pull the home community's environment + tools
+    state.me = await client.setHomeCommunity(previous);
+    state.previousHomePostcode = null;
+    dropStore(PREV_KEY);
+    await refresh();   // re-pull the restored street's environment + tools
     render();
-    toast(`Back to your street: ${homePostcode()}.`);
+    toast(`Back to your street: ${state.me.community.postcode}.`);
   });
 }
 async function chooseTemplate(templateId, btn) {
@@ -749,11 +744,11 @@ async function chooseTemplate(templateId, btn) {
   } });
 }
 async function borrow(toolId, requirementId, btn) {
-  const tool = visibleTools().find(t => t.id === toolId) || state.tools.find(t => t.id === toolId);
+  const tool = state.tools.find(t => t.id === toolId);
   if (!tool || tool.availability !== 'available') { toast('This tool is no longer available to request.'); render(); return; }
   if (state.me && tool.owner.id === state.me.id) { toast('That is your own tool — a neighbour has to borrow it.'); return; }
   const tooFar = typeof tool.distance_m === 'number' && tool.distance_m > 2000;
-  if (tooFar) { toast('That tool is in another neighbourhood. Borrowing works within 2 km — browsing is fine.'); return; }
+  if (tooFar) { toast('That tool is in another neighbourhood. Borrowing works within 2 km of your street.'); return; }
   await action(btn, async () => {
     const fields = { tool_id: toolId };
     if (requirementId) fields.requirement_id = String(requirementId).split('#')[0];
@@ -852,7 +847,7 @@ document.addEventListener('change', e => {
     const id = e.target.dataset.taskPlace;
     const option = taskPlaceOptions().find(p => p.id === id && !p.disabled);
     ui.selectedPlaceId = option ? option.id : null;
-    ui.selectedPlaceCommunityId = currentCommunity().id;
+    ui.selectedPlaceCommunityId = homeCommunity().id;
     render();
     return;
   }
